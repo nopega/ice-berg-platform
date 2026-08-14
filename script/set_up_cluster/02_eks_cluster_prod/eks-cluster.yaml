@@ -202,6 +202,23 @@ addons:
     version: latest
     wellKnownPolicies:
       ebsCSIController: true
+  # Required for HorizontalPodAutoscaler. EKS does not install it by default,
+  # and the consequence is not an error -- it is silence.
+  #
+  # Trino's worker HPA was created on day one and never scaled once. `kubectl
+  # get hpa` showed `<unknown>/50%`, the HPA logged FailedGetResourceMetric
+  # every 15 seconds -- 5918 times in 24 hours -- and nothing surfaced it,
+  # because a Deployment sitting at its minimum replica count looks exactly
+  # like a Deployment that has no reason to scale.
+  #
+  # This matters more than one red icon: the answer to "Team A sends ~100
+  # queries at 10am" is that the worker HPA absorbs the burst. Without this
+  # addon that claim was never true.
+  #
+  # Adding it here changes nothing on a running cluster -- see
+  # ../11_metrics_server_prod/, which adds it to the live one.
+  - name: metrics-server
+    version: latest
 
 # AWS Load Balancer Controller is intentionally not listed here: unlike the
 # entries above it is a Helm-installed Kubernetes controller, not an EKS

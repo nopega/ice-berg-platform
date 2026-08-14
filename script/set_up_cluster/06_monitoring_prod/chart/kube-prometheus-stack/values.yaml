@@ -1532,6 +1532,24 @@ grafana:
     accessModes: ["ReadWriteOnce"]
     size: 5Gi
 
+  # REQUIRED once persistence is on. Enabling the PVC above without this leaves
+  # Grafana permanently mid-upgrade.
+  #
+  # The subchart defaults to RollingUpdate, which starts the new pod BEFORE
+  # terminating the old one. A ReadWriteOnce EBS volume can only be attached to
+  # one node at a time, so the new pod waits at Init:0/1 for a volume the old
+  # pod is still holding, and the old pod is never terminated because the new
+  # one never becomes Ready. It sits there indefinitely.
+  #
+  # The failure is invisible from outside: the old pod keeps serving, so
+  # grafana.nopega.net answers 200 while the Deployment has been stuck for
+  # hours. It took Argo CD reporting the Application as Degraded to surface it.
+  #
+  # Recreate terminates first, then starts. The cost is a few seconds of
+  # downtime on every upgrade, which is the correct trade for a dashboard.
+  deploymentStrategy:
+    type: Recreate
+
   # Administrator credentials when not using an existing secret (see below)
   adminUser: admin
   # adminPassword: strongpassword

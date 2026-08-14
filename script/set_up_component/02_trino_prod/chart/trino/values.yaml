@@ -1682,7 +1682,32 @@ jmx:
     #         type: UNTYPED
     # ```
     securityContext: {}
-    resources: {}
+    # CHANGED (data-platform): was {}.
+    #
+    # NOT optional here, whatever the upstream comment below says. The worker
+    # Deployment has a HorizontalPodAutoscaler targeting CPU and memory
+    # utilisation, and utilisation is defined as a percentage of the REQUEST.
+    # A single container in the pod without one makes the figure undefined for
+    # the whole pod, and the HPA stops:
+    #
+    #   ScalingActive  False  FailedGetResourceMetric
+    #   missing request for memory in container jmx-exporter
+    #
+    # Which is how enabling a metrics sidecar quietly disabled autoscaling --
+    # the thing that is supposed to absorb Team A's 10am burst.
+    #
+    # The numbers are deliberately small and deliberately not zero. The
+    # exporter is a small JVM polling local RMI; it needs enough headroom not
+    # to be OOMKilled, and a request low enough that three of them (two
+    # workers plus the coordinator) do not displace anything on a node group
+    # that is already tight. If it starts restarting, raise the memory limit
+    # rather than the request -- the request is what the HPA divides by.
+    resources:
+      requests:
+        cpu: 50m
+        memory: 192Mi
+      limits:
+        memory: 384Mi
     # jmx.exporter.resources -- It is recommended not to specify default resources
     # and to leave this as a conscious choice for the user. This also increases
     # chances charts run on environments with little resources, such as Minikube.

@@ -1,0 +1,31 @@
+{
+  "Rules": [
+    {
+      "ID": "airflow-log-expiry",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "airflow/" },
+      "Expiration": { "Days": 30 }
+    },
+    {
+      "ID": "trino-audit-log-expiry",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "trino-audit/" },
+      "Expiration": { "Days": 365 }
+    },
+    {
+      "ID": "mimir-metrics-expiry",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "mimir/" },
+      "Transitions": [
+        { "Days": 90, "StorageClass": "STANDARD_IA" }
+      ],
+      "Expiration": { "Days": 730 }
+    },
+    {
+      "ID": "abort-incomplete-multipart-uploads",
+      "Status": "Enabled",
+      "Filter": {},
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    }
+  ]
+}

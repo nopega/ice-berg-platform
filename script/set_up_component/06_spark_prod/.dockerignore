@@ -1,0 +1,18 @@
+# Keeps the build context to exactly what the Dockerfile COPYs.
+#
+# __pycache__ is the one that matters: `COPY jobs/ /opt/spark/jobs/` would
+# otherwise ship .pyc files compiled by whatever Python happened to run on the
+# build machine. They are ignored at runtime when they do not match, so the
+# effect is not a crash -- just an image that differs between builds of
+# identical source, which defeats the point of a pinned tag.
+__pycache__/
+*.pyc
+*.pyo
+
+# The vendored Helm chart is for the cluster, not for the image.
+chart/
+
+# Scripts and docs are read by a human, never by a Spark job.
+*.sh
+*.md
+*.yaml

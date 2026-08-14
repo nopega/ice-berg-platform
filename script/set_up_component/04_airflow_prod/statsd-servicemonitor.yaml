@@ -1,0 +1,71 @@
+# ServiceMonitor for Airflow's StatsD exporter.
+#
+# WHY THIS FILE EXISTS AT ALL
+# -----------------------------
+# The official Airflow chart deploys a statsd-exporter and puts a Service in
+# front of it, but ships no ServiceMonitor. What it does instead is annotate
+# the Service:
+#
+#     prometheus.io/scrape: "true"
+#     prometheus.io/port: "9102"
+#
+# Those annotations are a convention from the pre-operator era, read by a
+# Prometheus configured with kubernetes_sd_configs and a relabel rule. The
+# Prometheus Operator does not read them at all. So with the chart alone, the
+# exporter runs, serves metrics on 9102, and is never scraped -- with nothing
+# anywhere reporting a problem.
+#
+# WHY AIRFLOW NEEDS AN EXPORTER WHEN NOTHING ELSE DOES
+# ------------------------------------------------------
+# Airflow emits StatsD and only StatsD. There is no native Prometheus endpoint
+# on the scheduler to point at, so a translating pod is not overhead that could
+# be optimised away -- it is the only path the metrics have.
+#
+# WHAT THESE METRICS ANSWER
+# ---------------------------
+# Task and DAG duration, tasks queued versus running, scheduler loop time, SLA
+# misses. Paired with the Spark operator's metrics, "the pipeline was late"
+# becomes a question with an answer: Airflow says when the task was queued and
+# when it started, the operator says when the driver actually got a node, and
+# the gap between them is either the scheduler or the cluster being full.
+#
+# Applied by 02_install_airflow_prod.sh after the Helm release, because the
+# Service it selects has to exist first.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: airflow-statsd
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: airflow
+    app.kubernetes.io/component: statsd
+spec:
+  # The ServiceMonitor lives in `monitoring` and the Service lives in
+  # `airflow`, so the namespace has to be named explicitly. Omitting this makes
+  # the selector match only within the ServiceMonitor's own namespace, which
+  # contains no Airflow Service -- producing zero targets and no error.
+  namespaceSelector:
+    matchNames:
+      - airflow
+  selector:
+    matchLabels:
+      # These three are set by the chart's statsd-service.yaml. `release` is
+      # the Helm release name; it is `airflow` here because
+      # 02_install_airflow_prod.sh installs it under that name. Renaming the
+      # release without changing this line silently breaks the scrape.
+      tier: airflow
+      component: statsd
+      release: airflow
+  endpoints:
+    # Port NAME, not number. The Service exposes two ports -- 9125/UDP for
+    # ingesting StatsD from Airflow, and 9102/TCP serving Prometheus. Matching
+    # by name makes it impossible to point at the UDP one by mistake, which
+    # would produce a target that never responds.
+    - port: statsd-scrape
+      path: /metrics
+      # 30s rather than the 5s used for the Spark operator. Airflow's metrics
+      # are counters and gauges about a scheduler loop measured in seconds;
+      # sampling them six times faster costs storage and answers nothing new.
+      interval: 30s
+      scrapeTimeout: 10s

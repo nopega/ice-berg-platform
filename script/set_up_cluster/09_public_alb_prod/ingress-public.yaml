@@ -1,0 +1,284 @@
+# Public entry point -- two Ingress objects that share ONE Application Load
+# Balancer via alb.ingress.kubernetes.io/group.name.
+#
+# WHY TWO OBJECTS AND NOT ONE WITH TWO HOST RULES
+# -------------------------------------------------
+# An Ingress lives in a namespace and can only reference Services in that same
+# namespace. Airflow is in `airflow` and Trino is in `data-platform`, so a
+# single Ingress physically cannot route to both.
+#
+# The group annotation is what stops that from meaning two load balancers. The
+# AWS Load Balancer Controller merges every Ingress sharing a group name into
+# one ALB, so this costs one ALB (~$20/month) rather than one per hostname.
+#
+# It also means Harbor can add its own Ingress later, in its own namespace,
+# with the same group name -- and neither of the files below has to change.
+#
+# Placeholders __CERT_ARN__ and __INBOUND_CIDRS__ are substituted by
+# 02_apply_public_ingress_prod.sh. This file is not applied directly.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: airflow-public
+  namespace: airflow
+  annotations:
+    # ---- shared ALB identity -------------------------------------------
+    # Every Ingress carrying this group name lands on the same load balancer.
+    # order decides rule priority within it; lower evaluates first. Both rules
+    # here are host-exact so they cannot overlap, but the numbers are set
+    # explicitly rather than left to the controller's default, which would
+    # otherwise reorder when a third Ingress joins.
+    alb.ingress.kubernetes.io/group.name: data-platform-public
+    alb.ingress.kubernetes.io/group.order: "10"
+
+    # internet-facing: the ALB gets public IPs in the public subnets. The
+    # nodes stay private -- only the load balancer is reachable, and only on
+    # the ports and source ranges below.
+    alb.ingress.kubernetes.io/scheme: internet-facing
+
+    # ip, not instance. Targets the pod IP directly through the VPC CNI rather
+    # than a NodePort, so traffic does not take an extra hop through a random
+    # node, and a pod moving between nodes does not need the target group
+    # rewritten.
+    alb.ingress.kubernetes.io/target-type: ip
+
+    # ---- TLS -----------------------------------------------------------
+    # 443 only. No port 80 listener at all: an HTTP listener that redirects to
+    # HTTPS is friendlier for humans typing a URL, but it also means the ALB
+    # answers on a plaintext port, and there is no browser-typed URL in this
+    # deployment worth that. Power BI and docker are configured with the full
+    # https:// address.
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: __CERT_ARN__
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+
+    # ---- who may reach it ----------------------------------------------
+    # The single most important line in this file. Without it the ALB accepts
+    # connections from the entire internet, and the only thing between an
+    # attacker and Airflow is its login form.
+    #
+    # This replaces what Cloudflare Access was providing on the tunnel.
+    alb.ingress.kubernetes.io/inbound-cidrs: __INBOUND_CIDRS__
+
+    # ---- health checking -----------------------------------------------
+    # Airflow's UI redirects unauthenticated requests to a login page, so the
+    # health check must accept a 3xx. Checking for 200 only would mark every
+    # target unhealthy and the ALB would serve 503 with all pods running --
+    # a failure that looks like Airflow is broken when it is not.
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/success-codes: 200-399
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+
+    # ---- misc ----------------------------------------------------------
+    # ALB attributes are properties of the LOAD BALANCER, not of a rule. Every
+    # Ingress in the group must declare an IDENTICAL value: if two disagree the
+    # controller refuses to build the model at all and reports "conflicting
+    # load balancer attributes", leaving the newest Ingress with no ADDRESS
+    # while the others keep working -- which reads like the new one failed on
+    # its own.
+    #
+    # 600s rather than the 60s default. Two independent reasons:
+    #   - Trino's first request of a query blocks while the coordinator plans,
+    #     and planning a wide scan over many Iceberg manifests can exceed a
+    #     minute. At 60s that reaches Power BI as a bare timeout.
+    #   - Pushing a large container layer over a slow uplink can exceed it
+    #     mid-transfer, and the ALB closes the connection with no error either
+    #     side can explain.
+    #
+    # Note on request body size: an ALB does NOT cap it, so nothing is needed
+    # here for `docker push`. (routing.http.max_request_body_size.bytes is not
+    # a real ALB attribute -- the ELBv2 API rejects it as unrecognised. The
+    # 1 MB body cap that idea came from belongs to API Gateway.)
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=600
+    alb.ingress.kubernetes.io/tags: Project=data-platform,Environment=prod
+spec:
+  ingressClassName: alb
+  rules:
+    - host: airflow.nopega.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: airflow-api-server
+                port:
+                  number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: trino-public
+  namespace: data-platform
+  annotations:
+    alb.ingress.kubernetes.io/group.name: data-platform-public
+    alb.ingress.kubernetes.io/group.order: "20"
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: __CERT_ARN__
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/inbound-cidrs: __INBOUND_CIDRS__
+
+    # /v1/info answers 200 without authentication, by design -- it is how
+    # Trino reports its own version and readiness. Every other path now
+    # requires a password, so using "/" here would health-check a 401 and
+    # every target would be marked unhealthy.
+    alb.ingress.kubernetes.io/healthcheck-path: /v1/info
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+
+    # ALB attributes are properties of the LOAD BALANCER, not of a rule. Every
+    # Ingress in the group must declare an IDENTICAL value: if two disagree the
+    # controller refuses to build the model at all and reports "conflicting
+    # load balancer attributes", leaving the newest Ingress with no ADDRESS
+    # while the others keep working -- which reads like the new one failed on
+    # its own.
+    #
+    # 600s rather than the 60s default. Two independent reasons:
+    #   - Trino's first request of a query blocks while the coordinator plans,
+    #     and planning a wide scan over many Iceberg manifests can exceed a
+    #     minute. At 60s that reaches Power BI as a bare timeout.
+    #   - Pushing a large container layer over a slow uplink can exceed it
+    #     mid-transfer, and the ALB closes the connection with no error either
+    #     side can explain.
+    #
+    # Note on request body size: an ALB does NOT cap it, so nothing is needed
+    # here for `docker push`. (routing.http.max_request_body_size.bytes is not
+    # a real ALB attribute -- the ELBv2 API rejects it as unrecognised. The
+    # 1 MB body cap that idea came from belongs to API Gateway.)
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=600
+    alb.ingress.kubernetes.io/tags: Project=data-platform,Environment=prod
+spec:
+  ingressClassName: alb
+  rules:
+    - host: trino.nopega.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: trino
+                port:
+                  number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: harbor-public
+  namespace: harbor
+  annotations:
+    alb.ingress.kubernetes.io/group.name: data-platform-public
+    alb.ingress.kubernetes.io/group.order: "30"
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: __CERT_ARN__
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/inbound-cidrs: __INBOUND_CIDRS__
+
+    # Harbor's own health endpoint. Answers 200 without authentication and
+    # reports the state of core, registry, database and redis together, so an
+    # unhealthy target here means a genuinely broken Harbor rather than a
+    # missing login.
+    alb.ingress.kubernetes.io/healthcheck-path: /api/v2.0/ping
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+
+    # ALB attributes are properties of the LOAD BALANCER, not of a rule. Every
+    # Ingress in the group must declare an IDENTICAL value: if two disagree the
+    # controller refuses to build the model at all and reports "conflicting
+    # load balancer attributes", leaving the newest Ingress with no ADDRESS
+    # while the others keep working -- which reads like the new one failed on
+    # its own.
+    #
+    # 600s rather than the 60s default. Two independent reasons:
+    #   - Trino's first request of a query blocks while the coordinator plans,
+    #     and planning a wide scan over many Iceberg manifests can exceed a
+    #     minute. At 60s that reaches Power BI as a bare timeout.
+    #   - Pushing a large container layer over a slow uplink can exceed it
+    #     mid-transfer, and the ALB closes the connection with no error either
+    #     side can explain.
+    #
+    # Note on request body size: an ALB does NOT cap it, so nothing is needed
+    # here for `docker push`. (routing.http.max_request_body_size.bytes is not
+    # a real ALB attribute -- the ELBv2 API rejects it as unrecognised. The
+    # 1 MB body cap that idea came from belongs to API Gateway.)
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=600
+    alb.ingress.kubernetes.io/tags: Project=data-platform,Environment=prod
+spec:
+  ingressClassName: alb
+  rules:
+    - host: harbor.nopega.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: harbor
+                port:
+                  number: 80
+---
+# Grafana. Added after the other three, which is why the certificate had to be
+# reissued -- see 01_request_acm_certificate_prod.sh.
+#
+# group.order 40 places it last among the rules on the shared load balancer.
+# Order only matters between rules that could match the same request; these are
+# all host-based and mutually exclusive, so this is really just a stable,
+# readable sequence.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana-public
+  namespace: monitoring
+  annotations:
+    alb.ingress.kubernetes.io/group.name: data-platform-public
+    alb.ingress.kubernetes.io/group.order: "40"
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: __CERT_ARN__
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/inbound-cidrs: __INBOUND_CIDRS__
+
+    # Grafana answers 200 here without a session, which is what a health check
+    # needs: pointing it at / would follow the redirect to /login and report a
+    # target as unhealthy every time someone is logged out.
+    alb.ingress.kubernetes.io/healthcheck-path: /api/health
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+
+    # Must be character-for-character identical to the value on every other
+    # Ingress in this group. The controller merges them into one load balancer
+    # model, and a single disagreement makes it refuse to build the model at
+    # all -- reported as "conflicting load balancer attributes", with the
+    # newest Ingress left without an ADDRESS while the others keep working.
+    # That reads like the new Ingress failed on its own, and it did not.
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=600
+    alb.ingress.kubernetes.io/tags: Project=data-platform,Environment=prod
+spec:
+  ingressClassName: alb
+  rules:
+    - host: grafana.nopega.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                # Named by the Helm release, not chosen here: the chart calls
+                # it <release>-grafana, and the release is kube-prometheus-stack.
+                name: kube-prometheus-stack-grafana
+                port:
+                  number: 80

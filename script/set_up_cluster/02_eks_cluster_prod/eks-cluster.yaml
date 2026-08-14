@@ -1,0 +1,222 @@
+# eks-cluster.yaml — PROD Kubernetes cluster for the Iceberg lakehouse
+#
+# Applied with:  eksctl create cluster -f eks-cluster.yaml
+#
+# Design notes (the "why" behind each block is in the comments below; the
+# short version is: managed control plane, split node groups so interruption-
+# tolerant work runs on cheap Spot capacity, and OIDC enabled so pods get
+# scoped AWS credentials through IRSA instead of node-wide permissions).
+
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: data-platform-prod
+  region: ap-southeast-1
+  # Kubernetes version is intentionally not pinned here — eksctl defaults to a
+  # current, fully supported version. Pinning an old version is what drags a
+  # cluster into EKS "extended support", where the control plane fee jumps
+  # from $0.10/hr to $0.60/hr (~$73/mo to ~$438/mo).
+
+# ---------------------------------------------------------------------------
+# IAM / OIDC
+# ---------------------------------------------------------------------------
+# withOIDC creates the cluster's OIDC identity provider and registers it with
+# IAM. This is the prerequisite for IRSA — without it, the prod IAM role
+# script (../03_iam_role_and_irsa_role/03_irsa_role_prod/) has no provider to
+# trust, and pods would have to fall back to node-wide instance profile
+# permissions.
+iam:
+  withOIDC: true
+
+# ---------------------------------------------------------------------------
+# Networking
+# ---------------------------------------------------------------------------
+# eksctl creates a dedicated VPC across 2 AZs. Private subnets for nodes with
+# a single NAT gateway: HA would want one NAT per AZ, but each NAT gateway is
+# ~$32/mo plus data processing, so a single gateway is the deliberate
+# cost/availability trade for this deployment.
+#
+# The "plus data processing" above is the part that matters most on a data
+# platform, and it is why the S3 gateway endpoint below is not optional.
+# NAT data processing is ~$0.045/GB, and S3 is this platform's storage layer:
+# a single 1 TB Trino scan would cost ~$45 in NAT charges alone, billed under
+# NAT Gateway rather than S3, where nobody thinks to look for it.
+#
+# A gateway endpoint costs nothing -- no hourly rate, no per-GB rate -- and
+# removes that charge entirely by routing S3 traffic straight out of the
+# subnet instead of through the NAT gateway.
+vpc:
+  nat:
+    gateway: Single
+  clusterEndpoints:
+    publicAccess: true
+    privateAccess: true
+  # eksctl does not create this by default. On an existing cluster, adding it
+  # here changes nothing -- run set_up_cluster/07_vpc_endpoints_prod/
+  # instead, which adds the endpoint to the live VPC.
+  serviceEndpoints:
+    - s3
+
+# ---------------------------------------------------------------------------
+# Node groups
+# ---------------------------------------------------------------------------
+managedNodeGroups:
+
+  # On-Demand: components that must not be interrupted mid-flight.
+  # Trino coordinator (loses all in-progress queries if killed), Iceberg REST
+  # catalog, Airflow scheduler, Prometheus.
+  #
+  # Sized for the deployed stack: Polaris (250m/512Mi), the Trino coordinator
+  # (300m/2Gi) and worker (800m/4Gi), Argo CD (~225m/576Mi), Airflow's control
+  # plane (450m/1.6Gi across scheduler, API server, triggerer and DAG
+  # processor), Harbor (~1200m/2.8Gi across seven pods), cloudflared, the Spark
+  # Operator, plus a ~1000m Spark driver and one task pod per running Airflow
+  # task.
+  #
+  # desiredCapacity has moved three times, each time for a measured reason
+  # rather than a guess. 1 -> 2 when Airflow was added; 2 -> 3 when Harbor was;
+  # 3 -> 4 when the first Spark driver had nowhere to run. At the 2 -> 3 step
+  # the running two-node cluster measured:
+  #
+  #   node 1   1200m / 1935m CPU (62%)   4992Mi / 7131Mi memory (70%)
+  #   node 2   1325m / 1949m CPU (68%)   4044Mi / 7095Mi memory (57%)
+  #
+  # ~1360m of CPU free, against ~1200m for Harbor alone. CPU is the binding
+  # constraint here, not memory, and two nodes ran out of it before the ETL
+  # pipeline — the thing the platform exists for — had anywhere to put a Spark
+  # driver. Spark executors are excluded from this arithmetic on purpose: they
+  # run on ng-spot.
+  #
+  # The failure mode is quiet: a pod that does not fit stays Pending,
+  # `helm upgrade --wait` blocks until timeout, and the reason appears only in
+  # `kubectl describe pod`.
+  #
+  # 3 -> 4: that prediction about the Spark driver came true. Harbor turned out
+  # to need more than the 1200m estimated once Trivy and its Postgres were
+  # counted, and at three nodes the largest free block of CPU was 349m against
+  # the 1000m a `cores: 1` driver requests. Full measurements and the two
+  # cheaper alternatives that were checked and did not fit are recorded in
+  # scale/scale_up.sh.
+  #
+  # maxSize stays above desiredCapacity so a node failure or a rolling
+  # AMI/version update has somewhere to place pods while it cycles.
+  # minSize equals desiredCapacity on purpose. The Cluster Autoscaler
+  # (set_up_cluster/10_cluster_autoscaler_prod) manages both node groups,
+  # and any min below desired is permission to drain this one -- evicting
+  # Harbor, Trino, Polaris and Airflow -- the first time it looks
+  # underutilised. maxSize is still above desired so it can GROW when a Spark
+  # driver has nowhere to fit.
+  #
+  # 4 -> 5: the monitoring stack. Prometheus, Grafana, Alertmanager,
+  # kube-state-metrics and the operator ask for roughly 1 vCPU and 2.5Gi
+  # between them, and the group had nothing like that free -- the whole reason
+  # it went to four nodes was a driver that could not find 1000m.
+  #
+  # Monitoring is deliberately NOT put on ng-spot, tempting as the price is.
+  # Prometheus holds its recent samples in memory and writes to an EBS volume
+  # that is bound to one availability zone; a Spot reclamation loses the
+  # in-memory window and forces the volume to reattach. Losing the monitoring
+  # exactly when nodes are churning is losing it exactly when it is needed.
+  #
+  # The cost is about $85/month for one m5.large in ap-southeast-1. That buys
+  # the answer to "is the platform healthy" without port-forwarding into it,
+  # and it is a smaller number than one engineer-hour of guessing.
+  - name: ng-ondemand
+    instanceType: m5.large
+    minSize: 5
+    desiredCapacity: 5
+    maxSize: 7
+    volumeSize: 50
+    volumeType: gp3
+    privateNetworking: true
+    labels:
+      workload: critical
+    iam:
+      withAddonPolicies:
+        # Lets the Cluster Autoscaler adjust this group's size.
+        autoScaler: true
+        cloudWatch: true
+
+  # Spot: Spark executors only.
+  #
+  # Trino workers used to run here too, and were moved to ng-ondemand. The
+  # distinction that matters is not "can this pod be restarted" but "who sees
+  # it fail": a lost Spark executor is recomputed by the driver and the job
+  # still succeeds, whereas a lost Trino worker returns an error to the person
+  # who ran the query. Trino can be made to survive it with fault-tolerant
+  # execution, but that spools every exchange through S3 and slows down all
+  # queries to protect against an event that only affects some. Details in
+  # 02_trino_prod/chart/trino/values.yaml.
+  #
+  # desiredCapacity is 0, matching scale/scale_up.sh. It was 1 while Trino
+  # workers lived here and needed a node permanently; with them moved to
+  # ng-ondemand nothing does, so the group costs nothing until Spark asks for
+  # capacity and scales back down afterwards. This is where Spot's 60-70%
+  # discount applies to the bulk of the compute at TB scale.
+  #
+  # Kept identical to scale_up.sh deliberately: two files disagreeing about the
+  # size of the same node group is how a cluster ends up in a state nobody
+  # intended, depending on which one ran last.
+  #
+  # Multiple instance types are listed on purpose: Spot capacity is
+  # per-instance-type, so offering alternatives greatly reduces the chance of
+  # being unable to get (or being reclaimed from) capacity.
+  - name: ng-spot
+    instanceTypes: ["m5.large", "m5a.large", "m5d.large", "m4.large"]
+    spot: true
+    minSize: 0
+    desiredCapacity: 0
+    maxSize: 4
+    volumeSize: 100
+    volumeType: gp3
+    privateNetworking: true
+    labels:
+      workload: batch
+      lifecycle: spot
+    # Taint keeps pods off Spot unless they explicitly tolerate it, so nothing
+    # critical lands here by accident. Spark/Trino worker manifests add the
+    # matching toleration.
+    taints:
+      - key: spot
+        value: "true"
+        effect: NoSchedule
+    iam:
+      withAddonPolicies:
+        autoScaler: true
+        cloudWatch: true
+
+# ---------------------------------------------------------------------------
+# Add-ons
+# ---------------------------------------------------------------------------
+addons:
+  - name: vpc-cni
+    version: latest
+  - name: coredns
+    version: latest
+  - name: kube-proxy
+    version: latest
+  # Required for any PersistentVolumeClaim (Prometheus local TSDB, Argo CD's
+  # Redis). Given its own IRSA role rather than node permissions.
+  - name: aws-ebs-csi-driver
+    version: latest
+    wellKnownPolicies:
+      ebsCSIController: true
+
+# AWS Load Balancer Controller is intentionally not listed here: unlike the
+# entries above it is a Helm-installed Kubernetes controller, not an EKS
+# managed addon. Install it after cluster creation with:
+#   ../08_load_balancer_controller_prod/01_create_irsa_prod.sh
+#   ../08_load_balancer_controller_prod/02_install_controller_prod.sh
+# It creates no ALB until a later, explicit Ingress is applied.
+
+# ---------------------------------------------------------------------------
+# Control plane logging
+# ---------------------------------------------------------------------------
+# Only audit and authenticator logs are enabled. Enabling all five log types
+# generates substantial CloudWatch Logs ingest charges on a busy cluster;
+# these two are the ones with real security value.
+cloudWatch:
+  clusterLogging:
+    enableTypes: ["audit", "authenticator"]
+    logRetentionInDays: 30

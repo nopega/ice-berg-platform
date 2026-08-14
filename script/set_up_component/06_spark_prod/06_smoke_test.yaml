@@ -1,0 +1,156 @@
+# End-to-end proof that the platform is wired together.
+#
+# This is the first real SparkApplication in the repo, and it is deliberately
+# the smallest one that can still fail at every link in the chain: image pull
+# from Harbor, IRSA credentials, Polaris catalog, 3-level namespaces, S3 write.
+#
+#   kubectl apply -f 06_smoke_test.yaml
+#   kubectl get sparkapplication -n spark -w
+#
+# Expected: NEW -> SUBMITTED -> RUNNING -> COMPLETED
+#
+# Replace __IMAGE_TAG__ with the tag 03_build_and_push_image_prod.sh printed.
+# It is a placeholder rather than `latest` on purpose -- see the note at the
+# bottom of that script.
+---
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: platform-smoke-test
+  namespace: spark
+spec:
+  type: Python
+  pythonVersion: "3"
+  mode: cluster
+  image: harbor.nopega.net/ice-berg-platform/datapipeline:__IMAGE_TAG__
+  imagePullPolicy: IfNotPresent
+
+  # The Harbor project is Private, so this is not optional. Without it the
+  # driver pod is created, sits in ImagePullBackOff, and the SparkApplication
+  # stays SUBMITTED with nothing in its status mentioning the registry.
+  # Created by 04_create_image_pull_secret_prod.sh.
+  imagePullSecrets:
+    - harbor-pull
+
+  # Baked into the image at /opt/spark/jobs/ by the Dockerfile's COPY. A real
+  # ETL job will instead have its code cloned by an initContainer, so that
+  # pipeline code can change without rebuilding the image -- but for a smoke
+  # test, fewer moving parts is the point.
+  mainApplicationFile: local:///opt/spark/jobs/smoke_test.py
+
+  sparkVersion: "4.0.1"
+
+  # Never. A smoke test that retries hides the failure it exists to reveal.
+  restartPolicy:
+    type: Never
+
+  # Delete driver and executor pods an hour after the job ends. Long enough to
+  # read `kubectl logs` after a failure that woke someone up; short enough that
+  # a week of runs does not fill the namespace with Completed pods.
+  timeToLiveSeconds: 3600
+
+  sparkConf:
+    # Event log to S3. This is what the History Server reads -- without it, a
+    # finished job leaves no trace once its pods are deleted.
+    spark.eventLog.enabled: "true"
+    spark.eventLog.dir: "s3a://data-store-prod-logs/spark-events/"
+
+    # The s3a:// scheme above is served by hadoop-aws, which needs to be told
+    # to use the pod's IRSA identity rather than looking for static keys.
+    spark.hadoop.fs.s3a.aws.credentials.provider: "software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider"
+
+    # Iceberg's own S3 access (table data) goes through S3FileIO, configured in
+    # smoke_test.py. These two paths are separate and both have to work.
+
+  # ---------------------------------------------------------------------
+  # Driver
+  # ---------------------------------------------------------------------
+  driver:
+    cores: 1
+    memory: 1g
+    serviceAccount: spark
+
+    # on-demand. Losing the driver ends the whole application; losing an
+    # executor costs only the partitions it held.
+    nodeSelector:
+      workload: critical
+
+    env:
+      # Polaris. Same in-cluster address Trino uses.
+      - name: POLARIS_URI
+        value: "http://polaris.data-platform.svc.cluster.local:8181/api/catalog"
+      - name: WAREHOUSE_BUCKET
+        value: "data-store-prod-warehouse"
+
+    # The catalog credential, from the Secret that 01_create_trino_secret_prod.sh
+    # created in the data-platform namespace and that must be copied into
+    # `spark`. See the note at the bottom of this file -- this is the one thing
+    # the smoke test needs that is not created automatically.
+    envFrom:
+      - secretRef:
+          name: spark-polaris-credentials
+
+  # ---------------------------------------------------------------------
+  # Executors
+  # ---------------------------------------------------------------------
+  executor:
+    # Two, not one. One executor still proves the code runs, but it does NOT
+    # prove that the driver can reach executors over the network or that the
+    # webhook applied the executor nodeSelector -- both of which are exactly
+    # the things that break first.
+    instances: 2
+    cores: 1
+    memory: 1g
+    serviceAccount: spark
+
+    # spot. This value only lands on the pod if the admission webhook is
+    # working, so a smoke test that schedules its executors onto on-demand
+    # nodes is itself evidence that the webhook is not doing its job.
+    nodeSelector:
+      workload: batch
+
+    # The taint on ng-spot is `spot=true:NoSchedule` -- see eks-cluster.yaml.
+    # It is NOT `workload=batch`; that is the node LABEL, which is what the
+    # nodeSelector above matches. Labels attract, taints repel, and they are
+    # configured separately even when they describe the same nodes.
+    #
+    # A toleration naming the wrong key is not rejected by anything. The pod is
+    # accepted, stays Pending, and the driver reports
+    #
+    #   Initial job has not accepted any resources; check your cluster UI to
+    #   ensure that workers are registered and have sufficient resources
+    #
+    # which reads as a capacity problem. `kubectl describe pod` on the executor
+    # is what actually names the taint.
+    tolerations:
+      - key: "spot"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+
+    env:
+      - name: POLARIS_URI
+        value: "http://polaris.data-platform.svc.cluster.local:8181/api/catalog"
+      - name: WAREHOUSE_BUCKET
+        value: "data-store-prod-warehouse"
+    envFrom:
+      - secretRef:
+          name: spark-polaris-credentials
+
+# BEFORE APPLYING, create the Polaris credential in this namespace:
+#
+#   ./05_create_polaris_credential_prod.sh
+#
+# That installs the `etl` principal. An earlier revision of this file told you
+# to copy Trino's Secret across from the data-platform namespace instead, which
+# worked and was a mistake worth understanding rather than just correcting.
+#
+# Trino's Secret holds the Polaris ROOT principal. Polaris vends short-lived S3
+# credentials per request, and decides what to vend from the privileges of the
+# principal asking. Asking as root returns credentials for everything, so the
+# vending machinery ran correctly and enforced nothing. Nothing failed, no
+# warning appeared, and the platform looked governed while it was not.
+#
+# 05_create_polaris_credential_prod.sh refuses to install the root credential
+# for exactly that reason -- the mistake is not a typo, it is reaching for the
+# credential that is known to work while debugging something else.

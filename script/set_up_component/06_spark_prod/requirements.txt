@@ -1,0 +1,40 @@
+# Python dependencies baked into the Spark image.
+#
+# Kept as a separate file, not inlined into the Dockerfile, for one concrete
+# reason: dependency scanners (Dependabot, pip-audit, Renovate) look for this
+# filename. Pins written inside a RUN instruction are invisible to them, so a
+# CVE in requests would only surface when Trivy scans the built image at push
+# time -- later, and after the vulnerable image already exists.
+#
+# Every version is exact (==), never a range. A range means two builds of the
+# same Dockerfile can produce different images, and the difference only shows
+# up when a job behaves differently than it did yesterday.
+#
+# Deliberately short. Anything added here ships to every executor on every
+# job, so the bar is "the ETL cannot run without it", not "might be handy".
+#
+# Versions verified against PyPI on 2026-08-14.
+#
+# EVERYTHING HERE MUST SUPPORT PYTHON 3.10.
+# apache/spark:4.0.1 is built on Ubuntu 22.04, whose python3 is 3.10. That is
+# the constraint, not a preference -- a package needing 3.11+ fails at install
+# with a requires-python error that names the package, not the base image.
+
+# Interactive REPL. Used by `kubectl exec` into a running driver to inspect a
+# live SparkSession without re-submitting the job.
+#
+# 8.39.0, not the current 9.x: the 9 series requires Python >= 3.11.
+ipython==8.39.0
+
+# Arrow. PySpark uses it for the JVM<->Python transfer path; without it,
+# toPandas() and pandas UDFs fall back to a row-at-a-time conversion that is
+# slower by roughly an order of magnitude. PySpark does not pull it in itself.
+pyarrow==25.0.1
+
+# AWS SDK for Python. Only for the small control-plane calls the ETL makes
+# directly -- Spark's own S3 access goes through the JVM.
+boto3==1.43.71
+
+# HTTP client. NYC TLC publishes its monthly Parquet files over HTTPS rather
+# than in a bucket that can be read directly.
+requests==2.34.2

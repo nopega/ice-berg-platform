@@ -1,0 +1,1923 @@
+# Default values for trino.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# -- Override resource names to avoid name conflicts when deploying multiple
+# releases in the same namespace.
+# @raw
+# Example:
+# ```yaml
+# coordinatorNameOverride: trino-coordinator-adhoc
+# workerNameOverride: trino-worker-adhoc
+# nameOverride: trino-adhoc
+# fullnameOverride: trino-adhoc
+# ```
+nameOverride:
+fullnameOverride:
+coordinatorNameOverride:
+workerNameOverride:
+
+image:
+  # -- Image registry, defaults to empty, which results in DockerHub usage
+  registry: ""
+  # -- Repository location of the Trino image, typically `organization/imagename`
+  repository: trinodb/trino
+  # -- Image tag, defaults to the Trino release version specified as `appVersion` from Chart.yaml
+  tag: ""
+  # -- Optional digest value of the image specified as `sha256:abcd...`. A specified value overrides `tag`.
+  digest: ""
+  # -- When true, only the content in `repository` is used as image reference
+  useRepositoryAsSoleImageReference: false
+  pullPolicy: IfNotPresent
+
+# -- An optional list of references to secrets in the same namespace to use for pulling images.
+# @raw
+# Example:
+# ```yaml
+# imagePullSecrets:
+#   - name: registry-credentials
+# ```
+imagePullSecrets: []
+
+server:
+  # CHANGED (data-platform): 2 -> 1 -> 2. Back to two, for a measured reason.
+  #
+  # One worker was chosen when the cluster was two m5.large nodes and capacity
+  # was the only consideration. Working through the brief's assumption -- "100
+  # queries every time users require a report" -- showed that memory, not pod
+  # count, is what breaks first:
+  #
+  #   one worker    3G heap, minus ~30% JVM headroom  =  ~2.1G usable pool
+  #   team_a admits 12 concurrent queries              =  ~175MB each
+  #
+  # 175MB is below what a non-trivial query needs, so queries spill to disk or
+  # fail with "exceeded per-node memory limit" -- while the pod looks healthy
+  # and CPU sits idle, which is a genuinely confusing thing to debug.
+  #
+  # Two workers double the pool to ~4.2G, and the concurrency limits below were
+  # lowered at the same time. Both changes point the same way: fewer queries
+  # each with enough memory finish sooner than more queries contending for too
+  # little.
+  #
+  # Autoscaling still handles the burst; two is the floor so the first wave of
+  # a burst is not served by a single pod while the HPA is still reacting.
+  workers: 2
+  node:
+    # server.node.environment -- Supports templating with `tpl`.
+    environment: production
+    dataDir: /data/trino
+    pluginDir: /usr/lib/trino/plugin
+  log:
+    trino:
+      level: INFO
+  config:
+    path: /etc/trino
+    https:
+      enabled: false
+      port: 8443
+      keystore:
+        path: ""
+    # -- Trino supports multiple [authentication
+    # types](https://trino.io/docs/current/security/authentication-types.html):
+    # PASSWORD, CERTIFICATE, OAUTH2, JWT, KERBEROS, HEADER.
+    # CHANGED (data-platform): Power BI reaches the coordinator through the
+    # public ALB. Password auth is the smallest self-contained credential
+    # system for this take-home; the bcrypt hashes live in a Kubernetes Secret
+    # whose source of truth is AWS Secrets Manager. OIDC is the production
+    # upgrade path when an identity provider is available.
+    authenticationType: "PASSWORD"
+    query:
+      # CHANGED (data-platform): 4GB -> 2GB.
+      # This is the cluster-wide ceiling for a single query's distributed
+      # memory. It has to stay below (worker heap x worker count) or Trino
+      # admits queries it cannot finish and they die mid-flight with
+      # EXCEEDED_GLOBAL_MEMORY_LIMIT instead of being queued.
+      maxMemory: "2GB"
+  exchangeManager: {}
+  # server.exchangeManager -- Mandatory [exchange manager
+  # configuration](https://trino.io/docs/current/admin/fault-tolerant-execution.html#id1).
+  # Used to set the name and location(s) of spooling data storage. For multiple destinations use a list or a comma separated URI locations.
+  # To enable fault-tolerant execution, set the `retry-policy` property in `additionalConfigProperties`.
+  # Additional exchange manager configurations can be added to `additionalExchangeManagerProperties`.
+  # @raw
+  # Example:
+  # ```yaml
+  # server:
+  #   exchangeManager:
+  #     name: "filesystem"
+  #     baseDir:
+  #       - "/tmp/trino-local-file-system-exchange-manager"
+  # additionalConfigProperties:
+  #   - retry-policy=TASK
+  # additionalExchangeManagerProperties:
+  #   - exchange.sink-buffer-pool-min-size=10
+  #   - exchange.sink-buffers-per-partition=2
+  #   - exchange.source-concurrent-readers=4
+  # ```
+
+  workerExtraConfig: ""
+  coordinatorExtraConfig: ""
+  # server.autoscaling -- Configure [Horizontal Pod Autoscaling](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/)
+  # for workers (`server.keda.enabled` must be `false`).
+  # CHANGED (data-platform): enabled, maxReplicas 5 -> 3 -> 5.
+  #
+  # This is the "scales up for the daily burst, back down after" behaviour the
+  # problem statement asks for. The ceiling was lowered to 3 when workers ran
+  # on the two-node spot group; it is back at 5 now that the on-demand group
+  # runs three nodes with a ceiling of five.
+  #
+  # What the ceiling has to respect is that a Pending pod is worse than a
+  # missing one: it looks like autoscaling working while queries stay queued.
+  # At 800m/4Gi per worker, five workers is 4 vCPU / 20Gi, which needs the node
+  # group at or near its own maximum -- so if this is raised further, raise
+  # ng-ondemand's maxSize in eks-cluster.yaml in the same change.
+  #
+  # Note the HPA only reacts *after* load arrives. A burst of 100 queries is
+  # served by the two baseline workers for the first 30-60 seconds regardless
+  # of what this number says, which is the other half of why `workers` above
+  # went back to 2.
+  autoscaling:
+    enabled: true
+    maxReplicas: 5
+    # -- Target average CPU utilization, represented as a percentage of requested CPU. To disable scaling based on CPU,
+    # set to an empty string.
+    targetCPUUtilizationPercentage: 50
+    # -- Target average memory utilization, represented as a percentage of requested memory. To disable scaling
+    # based on memory, set to an empty string.
+    targetMemoryUtilizationPercentage: 80
+    behavior: {}
+    # server.autoscaling.behavior -- Configuration for scaling up and down.
+    # @raw
+    # Example:
+    # ```yaml
+    #  scaleDown:
+    #    stabilizationWindowSeconds: 300
+    #    policies:
+    #    - type: Percent
+    #      value: 100
+    #      periodSeconds: 15
+    #  scaleUp:
+    #    stabilizationWindowSeconds: 0
+    #    policies:
+    #    - type: Percent
+    #      value: 100
+    #      periodSeconds: 15
+    #    - type: Pods
+    #      value: 4
+    #      periodSeconds: 15
+    #    selectPolicy: Max
+    # ```
+
+  # server.keda -- Configure [Kubernetes Event-driven Autoscaling](https://keda.sh/) for workers
+  # (`server.autoscaling.enabled` must be `false`).
+  keda:
+    enabled: false
+    pollingInterval: 30
+    # -- Period (in seconds) to wait after the last trigger reported active before scaling the resource back to 0
+    cooldownPeriod: 300
+    # -- The delay (in seconds) before the `cooldownPeriod` starts after the initial creation of the `ScaledObject`.
+    initialCooldownPeriod: 0
+    # -- Minimum number of replicas KEDA will scale the resource down to.
+    # By default, it’s scale to zero, but you can use it with some other value as well.
+    minReplicaCount: 0
+    # -- This setting is passed to the HPA definition that KEDA will create for a given resource and
+    # holds the maximum number of replicas of the target resource.
+    maxReplicaCount: 5
+    fallback: {}
+    # server.keda.fallback -- Defines a number of replicas to fall back to if a scaler is in an error state.
+    # @raw
+    # Example:
+    # ```yaml
+    # fallback:             # Optional. Section to specify fallback options
+    #   failureThreshold: 3 # Mandatory if fallback section is included
+    #   replicas: 6         # Mandatory if fallback section is included
+    # ```
+    advanced: {}
+    # server.keda.advanced -- Specifies HPA related options
+    # @raw
+    # Example:
+    # ```yaml
+    # advanced:
+    #   horizontalPodAutoscalerConfig:
+    #     behavior:
+    #       scaleDown:
+    #         stabilizationWindowSeconds: 300
+    #         policies:
+    #           - type: Percent
+    #             value: 100
+    #             periodSeconds: 15
+    # ```
+    triggers: []
+    # server.keda.triggers -- List of triggers to activate scaling of the target resource
+    # @raw
+    # Example:
+    # ```yaml
+    # triggers:
+    #   - type: prometheus
+    #     metricType: Value
+    #     metadata:
+    #       serverAddress: "http://prometheus.example.com"
+    #       threshold: "1"
+    #       metricName: required_workers
+    #       query: >-
+    #         sum by (service)
+    #         (avg_over_time(trino_execution_ClusterSizeMonitor_RequiredWorkers{service={{ include "trino.fullname" . | quote }}}[5s]))
+    # ```
+    annotations: {}
+    # server.keda.annotations -- Annotations to apply to the ScaledObject CRD.
+    # @raw
+    # Example:
+    # ```yaml
+    # annotations:
+    #   autoscaling.keda.sh/paused-replicas: "0"
+    #   autoscaling.keda.sh/paused: "true"
+    # ```
+
+# CHANGED (data-platform): was `{}`, which means every authenticated user can
+# read and write every catalog.
+#
+# Password authentication answers "who are you". It says nothing about what you
+# may touch. Until this block existed, `team_b_powerbi` -- a credential that is
+# by design handed to a BI tool on someone's laptop -- could
+# `SELECT * FROM data_platform."bronze.transactional".taxi_trip` and read every
+# raw record the platform has ever landed, and could DROP any table in it.
+#
+# WHY THE BI ACCOUNT IS RESTRICTED TO GOLD
+# ------------------------------------------
+# Gold is the only layer with a contract. Bronze is a verbatim copy of whatever
+# the publisher sent, silver's shape changes whenever a cleaning rule changes,
+# and a report built on either would break without anyone having touched the
+# report. Restricting the BI account is not only a security control; it is what
+# keeps "we changed a filter in silver" from becoming "the dashboard is wrong".
+#
+# HOW THE RULES ARE EVALUATED
+# -----------------------------
+# First match wins, top to bottom, so the deny-all entries at the end of each
+# list are the default and every grant has to appear above them. A rule with no
+# `user` key matches everyone -- that is why the final catalog rule is
+# `"allow": "none"` and not an omission.
+#
+# `read-only` on a catalog still permits SELECT; it forbids INSERT, DELETE,
+# UPDATE and any DDL. The table rules narrow it further, to gold only.
+#
+# WHAT THIS DOES NOT HIDE
+# -------------------------
+# Trino filters TABLES by these rules, so `SHOW TABLES` in a bronze schema
+# comes back empty for the BI user. It does NOT filter schema NAMES: the
+# navigator in Power BI will still list `bronze.transactional`, and it will be
+# empty when opened. Hiding the names as well needs a catalog per layer, which
+# is a bigger change than the exposure justifies -- a schema name is not a
+# secret, its contents are.
+#
+# `etl_setup` keeps full access: it is the account used to create and repair
+# tables from a terminal, and it is not the one that leaves the cluster.
+#
+# THE TWO METADATA GRANTS AT THE END OF `tables`, AND WHY THEY ARE NOT OPTIONAL
+# ------------------------------------------------------------------------------
+# With `accessControl: {}` Trino allows everything. The moment a `tables`
+# stanza exists, the default flips to deny, and that applies to the metadata
+# tables every JDBC and ODBC client reads before it can show a single object.
+# Without the `system.jdbc` grant, DBeaver and Power BI authenticate
+# successfully and then fail to expand the catalog with
+#
+#     Access Denied: Cannot select from table system.jdbc.tables
+#
+# which looks like a connection problem and is not.
+#
+# The grant is scoped to schema `jdbc`, deliberately, NOT to the whole `system`
+# catalog. `system.runtime.queries` holds the SQL text of every query any user
+# has run; granting the catalog wholesale would let the BI account read Team
+# A's queries.
+#
+# Known limitation, worth stating rather than discovering later: Trino does not
+# apply the table rules above when filtering `system.jdbc.tables`
+# (trinodb/trino#20864). The BI account can therefore see that
+# `bronze.transactional.taxi_trip` EXISTS. It cannot read a row of it. If
+# hiding the names matters, the fix is a catalog per medallion layer, since
+# catalog rules are enforced there.
+#
+# `information_schema` is granted for the same reason and is the standard,
+# per-catalog metadata view; its rows are filtered by the rules above.
+accessControl:
+  type: configmap
+  # Trino re-reads the file on this interval, so a rules change takes effect
+  # without restarting the coordinator and interrupting running queries.
+  refreshPeriod: 60s
+  configFile: "rules.json"
+  rules:
+    rules.json: |-
+      {
+        "catalogs": [
+          {
+            "user": "etl_setup",
+            "catalog": "(data_platform|system|tpch|tpcds)",
+            "allow": "all"
+          },
+          {
+            "user": "team_b_powerbi",
+            "catalog": "(data_platform|system)",
+            "allow": "read-only"
+          },
+          {
+            "allow": "none"
+          }
+        ],
+        "tables": [
+          {
+            "user": "etl_setup",
+            "catalog": "data_platform",
+            "schema": ".*",
+            "table": ".*",
+            "privileges": ["SELECT", "INSERT", "DELETE", "UPDATE", "OWNERSHIP"]
+          },
+          {
+            "user": "team_b_powerbi",
+            "catalog": "data_platform",
+            "schema": "^gold(\\..*)?$",
+            "table": ".*",
+            "privileges": ["SELECT"]
+          },
+          {
+            "catalog": "system",
+            "schema": "jdbc",
+            "table": ".*",
+            "privileges": ["SELECT"]
+          },
+          {
+            "catalog": ".*",
+            "schema": "information_schema",
+            "table": ".*",
+            "privileges": ["SELECT"]
+          },
+          {
+            "privileges": []
+          }
+        ]
+      }
+# accessControl -- [System access
+# control](https://trino.io/docs/current/security/built-in-system-access-control.html)
+# configuration.
+# @raw
+# Set the type property to either:
+# * `configmap`, and provide the rule file contents in `rules`,
+# * `properties`, and provide configuration properties in `properties`.
+# Properties example:
+# ```yaml
+# type: properties
+# properties: |
+#     access-control.name=custom-access-control
+#     access-control.custom_key=custom_value
+# ```
+# Config map example:
+# ```yaml
+#  type: configmap
+#  refreshPeriod: 60s
+#  # Rules file is mounted to /etc/trino/access-control
+#  configFile: "rules.json"
+#  rules:
+#    rules.json: |-
+#      {
+#        "catalogs": [
+#          {
+#            "user": "admin",
+#            "catalog": "(mysql|system)",
+#            "allow": "all"
+#          },
+#          {
+#            "group": "finance|human_resources",
+#            "catalog": "postgres",
+#            "allow": true
+#          },
+#          {
+#            "catalog": "hive",
+#            "allow": "all"
+#          },
+#          {
+#            "user": "alice",
+#            "catalog": "postgresql",
+#            "allow": "read-only"
+#          },
+#          {
+#            "catalog": "system",
+#            "allow": "none"
+#          }
+#        ],
+#        "schemas": [
+#          {
+#            "user": "admin",
+#            "schema": ".*",
+#            "owner": true
+#          },
+#          {
+#            "user": "guest",
+#            "owner": false
+#          },
+#          {
+#            "catalog": "default",
+#            "schema": "default",
+#            "owner": true
+#          }
+#        ]
+#      }
+# ```
+
+headerAuthenticator: {}
+# headerAuthenticator -- [Header authenticator](https://trino.io/docs/current/develop/header-authenticator.html)
+# configuration. Required when `server.config.authenticationType` contains `HEADER`.
+# @raw
+# Provide the plugin configuration properties. The `header-authenticator.name` value must
+# match the name of the installed authenticator plugin.
+# ```yaml
+# headerAuthenticator:
+#   properties: |
+#     header-authenticator.name=my-header-authenticator
+#     header-authenticator.username-header=X-Authenticated-User
+# ```
+
+# CHANGED (data-platform): was `{}` (no resource groups at all).
+#
+# This is what stops the two teams in the problem statement from starving each
+# other. Their query patterns are opposite:
+#
+#   Team A  ~100 heavy report queries in a burst, once a day at 10:00
+#   Team B  small monitoring queries, every hour, needs a fast answer
+#
+# With no resource groups, Trino runs queries first-come-first-served, so
+# Team A's burst occupies the cluster and Team B's 3-second monitoring query
+# sits in the queue behind 90 report queries. The teams are not competing for
+# a fair share -- one is simply blocking the other.
+#
+# The design below:
+#   softMemoryLimit         at what memory usage the group starts queueing
+#                           rather than admitting more queries
+#   hardConcurrencyLimit    how many run at once
+#   maxQueued               how many wait
+#   schedulingWeight        share of slots relative to sibling groups
+#
+# On schedulingPolicy, which is easy to get wrong (and was, first time round):
+# a group's policy governs how it picks between ITS OWN CHILDREN, and a child's
+# schedulingWeight is read by its PARENT. So the weights on team_a/team_b below
+# are only meaningful because `global` is weighted_fair; setting `global` to
+# plain `fair` while weighting the children makes Trino refuse to start with
+# "Must use 'weighted' or 'weighted_fair' scheduling policy if specifying
+# scheduling weight". Conversely there is no point giving team_a its own
+# schedulingPolicy, because it has no subgroups to schedule.
+#
+# weighted_fair rather than weighted: `weighted` picks probabilistically by
+# weight, so an unlucky run of draws can still leave Team B waiting.
+# weighted_fair also accounts for how far below its share a group currently is,
+# which is what turns "Team B gets 1/3 of slots on average" into "Team B gets a
+# slot soon", and a monitoring query only cares about the latter.
+#
+# team_a gets more concurrency (its work is the point of the platform) but a
+# lower memory ceiling per group, so one runaway aggregation cannot consume
+# the whole heap. team_b gets little concurrency but is never queued behind
+# team_a, which is what "fast answer" actually requires.
+#
+# Routing is by user name: the selectors match the Trino user the client
+# authenticates as. Anything unmatched lands in `other`, which is deliberately
+# tiny -- an unknown user should not be able to take the cluster.
+#
+# WHY THE CONCURRENCY LIMITS WENT DOWN, NOT UP
+# ---------------------------------------------
+# CHANGED (data-platform): global 20 -> 12, team_a 12 -> 6.
+#
+# Lowering these in response to "100 queries arrive at once" reads backwards,
+# so the arithmetic is worth writing down. Two workers at 3G heap leave roughly
+# 4.2G of usable memory pool across the cluster. Divided by the queries allowed
+# to run at once:
+#
+#   12 concurrent  ->  ~350MB each
+#    6 concurrent  ->  ~700MB each
+#
+# Queries that do not fit in their share spill to disk, which costs far more
+# than the wait would have. Six queries finishing quickly and then admitting
+# the next six beats twelve queries all running slowly -- total throughput is
+# higher and, more importantly, the first results come back sooner.
+#
+# Nothing is rejected either way: maxQueued stays at 150 for team_a, so a
+# 100-query burst queues rather than erroring, and drains in waves.
+#
+# `global` is 12 rather than the sum of its subgroups (6+5+3+2 = 16) on
+# purpose: it is a cluster-wide ceiling that stops every group being busy at
+# once from oversubscribing memory, while still letting any single group use
+# its full allowance when the others are idle.
+#
+# These numbers are arithmetic, not measurement. The real values come from
+# running the 100-query burst against gold and watching queued time versus
+# spilled bytes -- until then they are a defensible starting point, not a
+# tuned configuration.
+resourceGroups:
+  type: configmap
+  resourceGroupsConfig: |-
+    {
+      "rootGroups": [
+        {
+          "name": "global",
+          "softMemoryLimit": "80%",
+          "hardConcurrencyLimit": 12,
+          "maxQueued": 200,
+          "schedulingPolicy": "weighted_fair",
+          "jmxExport": true,
+          "subGroups": [
+            {
+              "name": "team_a",
+              "softMemoryLimit": "50%",
+              "hardConcurrencyLimit": 6,
+              "maxQueued": 150,
+              "schedulingWeight": 4
+            },
+            {
+              "name": "team_b",
+              "softMemoryLimit": "25%",
+              "hardConcurrencyLimit": 5,
+              "maxQueued": 40,
+              "schedulingWeight": 3
+            },
+            {
+              "name": "etl",
+              "softMemoryLimit": "60%",
+              "hardConcurrencyLimit": 3,
+              "maxQueued": 20,
+              "schedulingWeight": 2
+            },
+            {
+              "name": "other",
+              "softMemoryLimit": "10%",
+              "hardConcurrencyLimit": 2,
+              "maxQueued": 10,
+              "schedulingWeight": 1
+            }
+          ]
+        }
+      ],
+      "selectors": [
+        { "user": "team_a.*", "group": "global.team_a" },
+        { "user": "team_b.*", "group": "global.team_b" },
+        { "user": "etl.*",    "group": "global.etl" },
+        { "group": "global.other" }
+      ],
+      "cpuQuotaPeriod": "1h"
+    }
+# resourceGroups -- [Resource groups control](https://trino.io/docs/current/admin/resource-groups.html)
+# @raw
+# Set the type property to either:
+# * `configmap`, and provide the Resource groups file contents in `resourceGroupsConfig`,
+# * `properties`, and provide configuration properties in `properties`.
+# Properties example:
+# ```yaml
+#  type: properties
+#  properties: |
+#    resource-groups.configuration-manager=db
+#    resource-groups.config-db-url=jdbc:postgresql://trino-postgresql.postgresql.svc.cluster.local:3306/resource_groups
+#    resource-groups.config-db-user=username
+#    resource-groups.config-db-password=password
+# ```
+# Config map example:
+# ```yaml
+#  type: configmap
+#  # Resource groups file is mounted to /etc/trino/resource-groups/resource-groups.json
+#  resourceGroupsConfig: |-
+#      {
+#        "rootGroups": [
+#          {
+#            "name": "global",
+#            "softMemoryLimit": "80%",
+#            "hardConcurrencyLimit": 100,
+#            "maxQueued": 100,
+#            "schedulingPolicy": "fair",
+#            "jmxExport": true,
+#            "subGroups": [
+#              {
+#                "name": "admin",
+#                "softMemoryLimit": "30%",
+#                "hardConcurrencyLimit": 20,
+#                "maxQueued": 10
+#              },
+#              {
+#                "name": "finance_human_resources",
+#                "softMemoryLimit": "20%",
+#                "hardConcurrencyLimit": 15,
+#                "maxQueued": 10
+#              },
+#              {
+#                "name": "general",
+#                "softMemoryLimit": "30%",
+#                "hardConcurrencyLimit": 20,
+#                "maxQueued": 10
+#              },
+#              {
+#                "name": "readonly",
+#                "softMemoryLimit": "10%",
+#                "hardConcurrencyLimit": 5,
+#                "maxQueued": 5
+#              }
+#            ]
+#          }
+#        ],
+#        "selectors": [
+#          {
+#            "user": "admin",
+#            "group": "global.admin"
+#          },
+#          {
+#            "group": "finance|human_resources",
+#            "group": "global.finance_human_resources"
+#          },
+#          {
+#            "user": "alice",
+#            "group": "global.readonly"
+#          },
+#          {
+#            "group": "global.general"
+#          }
+#        ]
+#      }
+# ```
+
+additionalNodeProperties: []
+# additionalNodeProperties -- [Additional node
+# properties](https://trino.io/docs/current/installation/deployment.html#log-levels).
+# @raw
+# Example, assuming the NODE_ID environment variable has been set:
+# ```yaml
+#  - node.id=${NODE_ID}
+# ```
+
+# CHANGED (data-platform): ALB terminates TLS and forwards requests over HTTP
+# to port 8080. Trino must trust the forwarded HTTPS header; this plus its
+# shared internal secret is required for PASSWORD authentication behind a
+# reverse proxy. The value is injected from a Kubernetes Secret, never stored
+# in this chart.
+additionalConfigProperties:
+  - http-server.process-forwarded=true
+  - internal-communication.shared-secret=${ENV:TRINO_INTERNAL_SHARED_SECRET}
+# additionalConfigProperties -- [Additional config
+# properties](https://trino.io/docs/current/admin/properties.html).
+# @raw
+# Example:
+# ```yaml
+#  - internal-communication.shared-secret=random-value-999
+#  - http-server.process-forwarded=true
+# ```
+
+additionalLogProperties: []
+# additionalLogProperties -- [Additional log
+# properties](https://trino.io/docs/current/installation/deployment.html#log-levels).
+# @raw
+# Example:
+# ```yaml
+#  - io.airlift=DEBUG
+# ```
+
+additionalExchangeManagerProperties: []
+# additionalExchangeManagerProperties -- [Exchange manager
+# properties](https://trino.io/docs/current/admin/fault-tolerant-execution.html#exchange-manager).
+# @raw
+# Example:
+# ```yaml
+#  - exchange.s3.region=object-store-region
+#  - exchange.s3.endpoint=your-object-store-endpoint
+#  - exchange.s3.aws-access-key=your-access-key
+#  - exchange.s3.aws-secret-key=your-secret-key
+# ```
+
+sessionProperties: {}
+# sessionProperties -- [Session properties manager config
+# file](https://trino.io/docs/current/admin/session-property-managers.html) is
+# mounted to {{ .Values.server.config.path }}/session-property-config.json
+# @raw
+# Set the type property to either:
+# * `configmap`, and provide the session properties manager file contents in `sessionPropertiesConfig`,
+# * `properties`, and provide configuration properties in `properties`.
+
+# Properties example:
+# ```yaml
+# type: properties
+# properties: |
+#   session-property-config.configuration-manager=file
+#   session-property-manager.config-file=/etc/trino/session-property-config.json
+
+# Configmap Example:
+# ```yaml
+# type: configmap
+# sessionPropertiesConfig: |-
+#   [
+#     {
+#       "group": "global.*",
+#       "sessionProperties": {
+#         "query_max_execution_time": "8h"
+#       }
+#     },
+#     {
+#       "group": "global.interactive.*",
+#       "sessionProperties": {
+#         "query_max_execution_time": "1h"
+#       }
+#     },
+#     {
+#       "group": "global.pipeline.*",
+#       "clientTags": ["etl"],
+#       "sessionProperties": {
+#         "scale_writers": "true",
+#         "hive.insert_existing_partitions_behavior": "overwrite"
+#       }
+#     }
+#   ]
+# ```
+
+eventListenerProperties: []
+# eventListenerProperties -- [Event
+# listener](https://trino.io/docs/current/develop/event-listener.html#event-listener)
+# properties. To configure multiple event listeners, add them in
+# `coordinator.additionalConfigFiles` and `worker.additionalConfigFiles`, and
+# set the `event-listener.config-files` property in
+# `additionalConfigProperties` to their locations.
+# @raw
+# Example:
+# ```yaml
+#  - event-listener.name=custom-event-listener
+#  - custom-property1=custom-value1
+#  - custom-property2=custom-value2
+# ```
+
+# CHANGED (data-platform): added the `data_platform` catalog; kept tpch/tpcds.
+#
+# `data_platform` is the whole point of this deployment -- it points Trino at
+# Apache Polaris over the Iceberg REST catalog API.
+#
+# The key name here is a Trino-local alias and does not have to match anything
+# on the Polaris side -- the line that actually selects the remote catalog is
+# `iceberg.rest-catalog.warehouse` below. It is named `data_platform` anyway,
+# identical to the Polaris catalog, so that a table reference in a query reads
+# the same as the object it resolves to and nobody has to hold a translation
+# in their head. It cannot also match the S3 bucket name: bucket names forbid
+# underscores, while a SQL identifier containing a hyphen has to be
+# double-quoted at every use site, where forgetting the quotes silently parses
+# as subtraction. Two of the three names can agree; all three cannot.
+#
+# The four lines that matter most, and what breaks without them:
+#
+#   iceberg.rest-catalog.oauth2.scope=PRINCIPAL_ROLE:ALL
+#       The Iceberg REST client's default OAuth2 scope is `catalog`, which
+#       Polaris rejects outright: the token request comes back
+#       "invalid_scope: The scope is invalid" and every query on this catalog
+#       fails with the unhelpfully generic "Cannot obtain metadata". Polaris
+#       expects a Polaris-shaped scope, and PRINCIPAL_ROLE:ALL is the same
+#       value 05_create_catalog_prod.sh sends when it authenticates by curl.
+#
+#   iceberg.rest-catalog.oauth2.server-uri=.../v1/oauth/tokens
+#       Not strictly required today -- the client appends /v1/oauth/tokens to
+#       the catalog URI on its own -- but it logs a deprecation warning saying
+#       that fallback is going away (apache/iceberg#10537). Stating it removes
+#       a future upgrade break for the cost of one line.
+#
+#   iceberg.rest-catalog.vended-credentials-enabled=true
+#       Tells Trino to use the short-lived S3 credentials Polaris hands back
+#       per request, instead of trying to use its own AWS identity. Trino's
+#       pods have no S3 permissions of their own by design, so leaving this
+#       off produces 403s on every read that look like a bucket-policy
+#       problem rather than a missing flag.
+#
+#   fs.native-s3.enabled=true
+#       Trino 470+ requires the native S3 filesystem to be switched on
+#       explicitly; the legacy Hadoop-based one is gone. Without it Trino
+#       cannot open an s3:// path at all.
+#
+#   iceberg.rest-catalog.nested-namespace-enabled=true
+#       Off by default, and the default silently hides data rather than
+#       erroring: with it off, `SHOW SCHEMAS` lists only top-level namespaces,
+#       so the two-level tree created by 07_create_dg_namespaces_prod.sh
+#       (financial -> financial.invoice, and so on) appears as five schemas
+#       instead of ten, and the domain namespaces are unreachable from SQL
+#       entirely. Added in Trino 463 (trinodb/trino#22916).
+#       Cost to be aware of: `SHOW SCHEMAS` becomes N+1 REST calls -- one to
+#       list namespaces, then one per namespace to find its children
+#       (trinodb/trino#23961). Fine at ten namespaces; worth revisiting if the
+#       tree ever grows into the hundreds.
+#
+# The OAuth2 credential is injected from a Secret as the env var
+# POLARIS_OAUTH2_CREDENTIAL (see `envFrom` below) rather than written here,
+# so no client secret is committed to this file.
+#
+# tpch and tpcds are left in place deliberately: they are in-memory generated
+# datasets that need no storage at all, which makes them the fastest way to
+# prove "Trino itself is healthy" separately from "the Iceberg path works".
+catalogs:
+  data_platform: |
+    connector.name=iceberg
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri=http://polaris.data-platform.svc.cluster.local:8181/api/catalog
+    iceberg.rest-catalog.warehouse=data_platform
+    iceberg.rest-catalog.security=OAUTH2
+    iceberg.rest-catalog.oauth2.credential=${ENV:POLARIS_OAUTH2_CREDENTIAL}
+    iceberg.rest-catalog.oauth2.scope=PRINCIPAL_ROLE:ALL
+    iceberg.rest-catalog.oauth2.server-uri=http://polaris.data-platform.svc.cluster.local:8181/api/catalog/v1/oauth/tokens
+    iceberg.rest-catalog.vended-credentials-enabled=true
+    iceberg.rest-catalog.nested-namespace-enabled=true
+    iceberg.file-format=PARQUET
+    fs.native-s3.enabled=true
+    s3.region=ap-southeast-1
+  tpch: |
+    connector.name=tpch
+    tpch.splits-per-node=4
+  tpcds: |
+    connector.name=tpcds
+    tpcds.splits-per-node=4
+# catalogs -- Configure
+# [catalogs](https://trino.io/docs/current/installation/deployment.html#catalog-properties).
+# @raw
+# Example:
+# ```yaml
+#  objectstore: |
+#    connector.name=iceberg
+#    iceberg.catalog.type=glue
+#  jmx: |
+#    connector.name=memory
+#  memory: |
+#    connector.name=memory
+#    memory.max-data-per-node=128MB
+# ```
+# Supports templating with `tpl`.
+
+additionalCatalogs: {}
+# additionalCatalogs -- Deprecated, use `catalogs` instead. Configure additional
+# [catalogs](https://trino.io/docs/current/installation/deployment.html#catalog-properties).
+
+env: []
+# env -- additional environment variables added to every pod, specified as a list with explicit values
+# @raw
+# Example:
+# ```yaml
+#  - name: NAME
+#    value: "value"
+# ```
+
+# CHANGED (data-platform): was `[]`.
+# Injects POLARIS_OAUTH2_CREDENTIAL, which the data_platform catalog above reads
+# via ${ENV:...}. The Secret is created by 01_create_trino_secret_prod.sh from
+# the Polaris root credentials held in AWS Secrets Manager, so the client
+# secret exists in exactly one authoritative place and is never written into
+# this file or into a catalog properties file on disk.
+#
+# It goes on every pod, not just the coordinator: workers open their own S3
+# connections and resolve table metadata themselves, so they need the same
+# catalog configuration and the same credential.
+envFrom:
+  - secretRef:
+      name: trino-polaris-credentials
+  - secretRef:
+      name: trino-internal-communication
+# envFrom -- additional environment variables added to every pod, specified as a list of either `ConfigMap`
+# or `Secret` references
+# @raw
+# Example:
+# ```yaml
+#   - secretRef:
+#     name: extra-secret
+# ```
+
+initContainers: {}
+# initContainers -- Additional [containers that run to
+# completion](https://kubernetes.io/docs/concepts/workloads/pods/init-containers/)
+# during pod initialization.
+# @raw
+# Example:
+# ```yaml
+#  coordinator:
+#    - name: init-coordinator
+#      image: busybox:1.28
+#      imagePullPolicy: IfNotPresent
+#      command: ['sh', '-c', "until nslookup myservice.$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace).svc.cluster.local; do echo waiting for myservice; sleep 2; done"]
+#  worker:
+#    - name: init-worker
+#      image: busybox:1.28
+#      command: ['sh', '-c', 'echo The worker is running! && sleep 3600']
+# ```
+
+sidecarContainers: {}
+# sidecarContainers -- Additional [containers that starts
+# before](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/)
+# the Trino container and continues to run.
+# @raw
+# Example:
+# ```yaml
+#  coordinator:
+#    - name: side-coordinator
+#      image: busybox:1.28
+#      imagePullPolicy: IfNotPresent
+#      command: ['sleep', '1']
+#  worker:
+#    - name: side-worker
+#      image: busybox:1.28
+#      imagePullPolicy: IfNotPresent
+#      command: ['sleep', '1']
+# ```
+
+# -- [Pod security context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-security-context-for-a-pod) configuration.
+# To remove the default, set it to null (or `~`).
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+
+# -- [Container security context](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-security-context-for-a-container) configuration.
+containerSecurityContext:
+  # -- Control whether a process can gain more privileges than its parent process.
+  allowPrivilegeEscalation: false
+  capabilities:
+    # -- A list of the Linux kernel capabilities that are dropped from every container. Valid values are listed in
+    # [the capabilities manual page](https://man7.org/linux/man-pages/man7/capabilities.7.html). Ensure # to remove
+    # the "CAP_" prefix which the kernel attaches to the names of permissions.
+    drop:
+      - ALL
+
+shareProcessNamespace:
+  coordinator: false
+  worker: false
+
+service:
+  annotations: {}
+  type: ClusterIP
+  port: 8080
+  # service.nodePort -- The port the service listens on the host, for the `NodePort` type. If not set, Kubernetes will
+  # [allocate a port
+  # automatically](https://kubernetes.io/docs/concepts/services-networking/service/#nodeport-custom-port).
+  nodePort: ""
+
+# CHANGED (data-platform): mounts password.db from the Secret generated by
+# 02_create_trino_auth_secrets_prod.sh. The plaintext credentials are never
+# rendered into Helm output or kept in this repository.
+auth:
+  passwordAuthSecret: trino-password-authentication
+# auth -- Available authentication methods.
+# @raw
+# Use username and password provided as a [password file](https://trino.io/docs/current/security/password-file.html#file-format):
+# ```yaml
+#  passwordAuth: "username:encrypted-password-with-htpasswd"
+# ```
+# Set the name of a secret containing this file in the password.db key
+# ```yaml
+#  passwordAuthSecret: "trino-password-authentication"
+# ```
+# Additionally, set [users' groups](https://trino.io/docs/current/security/group-file.html#file-format):
+# ```yaml
+#  refreshPeriod: 5s
+#  groups: "group_name:user_1,user_2,user_3"
+# ```
+# Set the name of a secret containing this file in the group.db key
+# ```yaml
+#  groupsAuthSecret: "trino-groups-authentication"
+# ```
+
+serviceAccount:
+  # -- Specifies whether a service account should be created
+  create: false
+  # -- The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  # CHANGED (data-platform): "" -> data-platform-workload.
+  # Reuses the IRSA-annotated ServiceAccount created by
+  # 01_iceberg_catalog_and_polaris_prod/01_create_namespace_and_sa_prod.sh.
+  #
+  # Note that Trino does NOT rely on this for S3 access -- that comes from the
+  # credentials Polaris vends. The identity matters for anything else Trino
+  # asks AWS for, and it keeps every pod in this namespace on one auditable
+  # identity rather than silently falling back to the node role.
+  name: "data-platform-workload"
+  # -- Annotations to add to the service account
+  annotations: {}
+
+configMounts: []
+# configMounts -- Allows mounting additional Trino configuration files from
+# Kubernetes config maps on all nodes.
+# @raw
+# Example:
+# ```yaml
+#  - name: sample-config-mount
+#    configMap: sample-config-map
+#    path: /config-map/sample.json
+#    subPath: sample.json
+# ```
+
+secretMounts: []
+# secretMounts -- Allows mounting additional Trino configuration files from
+# Kubernetes secrets on all nodes.
+# @raw
+# Example:
+# ```yaml
+#  - name: sample-secret
+#    secretName: sample-secret
+#    path: /secrets/sample.json
+#    subPath: sample.json
+# ```
+
+coordinator:
+  deployment:
+    annotations: {}
+    progressDeadlineSeconds: 600
+    # coordinator.deployment.progressDeadlineSeconds -- The maximum time in seconds for a deployment to make progress before it
+    # is considered failed. The deployment controller continues to
+    # process failed deployments and a condition with a ProgressDeadlineExceeded
+    # reason is surfaced in the deployment status.
+
+    revisionHistoryLimit: 10
+    # coordinator.deployment.revisionHistoryLimit -- The number of old ReplicaSets to retain to allow rollback.
+
+    strategy: {}
+    # coordinator.deployment.strategy -- The deployment strategy to use to replace existing pods with new ones.
+
+  jvm:
+    # CHANGED (data-platform): 8G -> 1500M. The node is 8Gi total and shared;
+    # the coordinator plans and schedules rather than scanning data, so it is
+    # the cheapest place to give memory back.
+    maxHeapSize: "1500M"
+    minHeapSize:
+    maxHeapPercent:
+    # coordinator.jvm.maxHeapPercent -- Alternative method of setting heap size as a percentage of container memory limits, which is recommended for better JVM ergonomics. `maxHeapSize` must be unset for this to work.
+    initialHeapPercent:
+    # coordinator.jvm.initialHeapPercent -- sets the starting heap size as a percentage of container memory limits.
+    #
+    # NOTE: to disable dynamic heap resizing when setting the size as a percent, add `-XX:MaxHeapFreeRatio=100` or `-XX:-UseAdaptiveSizePolicy` to `additionalJVMConfig`.
+    gcMethod:
+      type: "UseG1GC"
+      g1:
+        heapRegionSize: "32M"
+
+  config:
+    memory:
+      heapHeadroomPerNode: ""
+    nodeScheduler:
+      includeCoordinator: false
+      # coordinator.config.nodeScheduler.includeCoordinator -- Allows scheduling work on the coordinator so that a
+      # single machine can function as both coordinator and worker. For large clusters, processing work on the
+      # coordinator can negatively impact query performance because the machine's resources are not available for the
+      # critical coordinator tasks of scheduling, managing, and monitoring query execution.
+    query:
+      # CHANGED (data-platform): 1GB -> 512MB, to stay well under the 1500M heap.
+      maxMemoryPerNode: "512MB"
+
+  additionalJVMConfig: []
+
+  additionalExposedPorts: {}
+  # coordinator.additionalExposedPorts -- Additional ports configured in the coordinator container and the service.
+  # @raw
+  # Example:
+  # ```yaml
+  #  https:
+  #    servicePort: 8443
+  #    name: https
+  #    port: 8443
+  #    nodePort: 30443
+  #    protocol: TCP
+  # ```
+
+  # CHANGED (data-platform): was `{}` (unset).
+  # requests == limits for memory so the pod gets the Guaranteed QoS class:
+  # the coordinator holds all query state and must not be the first thing the
+  # kubelet evicts under node pressure. Headroom above the 1500M heap covers
+  # JVM metaspace, thread stacks and direct buffers.
+  resources:
+    requests:
+      cpu: "300m"
+      memory: "2Gi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+  # coordinator.resources -- It is recommended not to specify default resources
+  # and to leave this as a conscious choice for the user. This also increases
+  # chances charts run on environments with little resources, such as Minikube.
+  # If you do want to specify resources, use the following example, and adjust
+  # it as necessary.
+  # @raw
+  # Example:
+  # ```yaml
+  #  limits:
+  #    cpu: 100m
+  #    memory: 128Mi
+  #  requests:
+  #    cpu: 100m
+  #    memory: 128Mi
+  # ```
+
+  livenessProbe: {}
+  # coordinator.livenessProbe -- [Liveness
+  # probe](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/#configure-probes)
+  # options
+  # @raw
+  # Example:
+  # ```yaml
+  #  initialDelaySeconds: 20
+  #  periodSeconds: 10
+  #  timeoutSeconds: 5
+  #  failureThreshold: 6
+  #  successThreshold: 1
+  # ```
+  readinessProbe: {}
+  # coordinator.readinessProbe -- [Readiness
+  # probe](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/#configure-probes)
+  # @raw
+  # Example:
+  # ```yaml
+  #  initialDelaySeconds: 20
+  #  periodSeconds: 10
+  #  timeoutSeconds: 5
+  #  failureThreshold: 6
+  #  successThreshold: 1
+  # ```
+
+  startupProbe: {}
+  # coordinator.startupProbe -- [Startup
+  # probe](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/#configure-probes)
+  # @raw
+  # Example:
+  # ```yaml
+  #  initialDelaySeconds: 10
+  #  periodSeconds: 2
+  #  timeoutSeconds: 2
+  #  failureThreshold: 60
+  #  successThreshold: 1
+  # ```
+
+  lifecycle: {}
+  # coordinator.lifecycle -- Coordinator container [lifecycle
+  # events](https://kubernetes.io/docs/tasks/configure-pod-container/attach-handler-lifecycle-event/)
+  # @raw
+  # Example:
+  # ```yaml
+  #  preStop:
+  #    exec:
+  #      command: ["/bin/sh", "-c", "sleep 120"]
+  # ```
+
+  terminationGracePeriodSeconds: 30
+
+  # CHANGED (data-platform): was `{}`.
+  # The coordinator loses every in-flight query if its pod dies, so it must not
+  # sit on a spot node AWS can reclaim with two minutes' notice. No toleration
+  # for the spot taint is set below, which enforces that from the other side.
+  nodeSelector:
+    workload: critical
+
+  tolerations: []
+
+  affinity: {}
+
+  additionalConfigFiles: {}
+  # coordinator.additionalConfigFiles -- Additional config files placed in the default configuration directory.
+  # Supports templating the files' contents with `tpl`.
+  # @raw
+  # Example:
+  # ```yaml
+  # secret.txt: |
+  #   secret-value={{- .Values.someValue }}
+  # ```
+
+  additionalVolumes: []
+  # coordinator.additionalVolumes -- One or more additional volumes to add to the coordinator.
+  # @raw
+  # Example:
+  # ```yaml
+  #  - name: extras
+  #    emptyDir: {}
+  # ```
+
+  additionalVolumeMounts: []
+  # coordinator.additionalVolumeMounts -- One or more additional volume mounts to add to the coordinator.
+  # @raw
+  # Example:
+  #  - name: extras
+  #    mountPath: /usr/share/extras
+  #    readOnly: true
+
+  priorityClassName: ~
+
+  annotations: {}
+  # coordinator.annotations -- Annotations to add to the coordinator pod.
+  # @raw
+  # By default, the following annotations are added to the coordinator pod:
+  # - `checksum/access-control-config` - checksum of the coordinator access control config file;
+  # - `checksum/catalog-config` - checksum of the catalog config file;
+  # - `checksum/coordinator-config` - checksum of the coordinator config file.
+  # This allows for automatic rolling updates on configuration changes. This behaviour can be disabled by manually
+  # setting these annotations to fixed constants in the `coordinator.annotations` section.
+  # Example:
+  # ```yaml
+  #  annotations:
+  #    checksum/access-control-config: ""
+  #    checksum/catalog-config: ""
+  #    checksum/coordinator-config: ""
+  # ```
+
+  labels: {}
+
+  configMounts: []
+  # coordinator.configMounts -- Allows mounting additional Trino configuration
+  # files from Kubernetes config maps on the coordinator node.
+  # @raw
+  # Example:
+  # ```yaml
+  #  - name: sample-config-mount
+  #    configMap: sample-config-mount
+  #    path: /config-mount/sample.json
+  #    subPath: sample.json
+  # ```
+
+  secretMounts: []
+  # coordinator.secretMounts -- Allows mounting additional Trino configuration
+  # files from Kubernetes secrets on the coordinator node.
+  # @raw
+  # Example:
+  # ```yaml
+  #  - name: sample-secret
+  #    secretName: sample-secret
+  #    path: /secrets/sample.json
+  #    subPath: sample.json
+  # ```
+
+worker:
+  deployment:
+    annotations: {}
+    progressDeadlineSeconds: 600
+    # worker.deployment.progressDeadlineSeconds -- The maximum time in seconds for a deployment to make progress before it
+    # is considered failed. The deployment controller continues to
+    # process failed deployments and a condition with a ProgressDeadlineExceeded
+    # reason is surfaced in the deployment status.
+
+    revisionHistoryLimit: 10
+    # worker.deployment.revisionHistoryLimit -- The number of old ReplicaSets to retain to allow rollback.
+
+    # CHANGED (data-platform): was `{}`, i.e. Kubernetes' default rolling
+    # update, which brings the replacement pod up BEFORE taking the old one
+    # down. That needs double the capacity for the duration of the rollout,
+    # and a Trino worker requests 800m CPU / 4Gi -- two of them do not fit on
+    # one m5.large. The result is a new pod stuck Pending forever, the old one
+    # never terminating, and `helm upgrade --wait` hanging until it times out
+    # with nothing obviously broken.
+    #
+    # maxSurge: 0 flips the order: terminate first, then create. Workers are
+    # stateless and interchangeable, so the cost is a few seconds with less
+    # query capacity rather than an outage -- and on a spot node group that can
+    # lose a node at any moment, tolerating exactly that is already a
+    # requirement.
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 0
+        maxUnavailable: 1
+    # worker.deployment.strategy -- The deployment strategy to use to replace existing pods with new ones.
+
+  jvm:
+    # CHANGED (data-platform): 8G -> 3G. Workers do the actual scanning and
+    # joining, so this is where heap matters. 3G fits one m5.large alongside
+    # the kubelet and DaemonSets; asking for 8G would leave the pod Pending
+    # forever with no obvious reason why.
+    maxHeapSize: "3G"
+    minHeapSize:
+    maxHeapPercent:
+    # jvm.maxHeapPercent -- Alternative method of setting heap size as a percentage of container memory limits, which is recommended for better JVM ergonomics. `maxHeapSize` must be unset for this to work.
+    initialHeapPercent:
+    # jvm.initialHeapPercent -- sets the starting heap size as a percentage of container memory limits.
+    #
+    # NOTE: to disable dynamic heap resizing when setting the size as a percent, add `-XX:MaxHeapFreeRatio=100` or `-XX:-UseAdaptiveSizePolicy` to `additionalJVMConfig`.
+    gcMethod:
+      type: "UseG1GC"
+      g1:
+        heapRegionSize: "32M"
+
+  config:
+    memory:
+      heapHeadroomPerNode: ""
+    query:
+      # KEPT at 1GB (data-platform): comfortably under the 3G worker heap.
+      maxMemoryPerNode: "1GB"
+
+  additionalJVMConfig: []
+
+  additionalExposedPorts: {}
+  # worker.additionalExposedPorts -- Additional container ports configured in all worker pods and the worker service.
+  # @raw
+  # Example:
+  # ```yaml
+  #  https:
+  #    servicePort: 8443
+  #    name: https
+  #    port: 8443
+  #    protocol: TCP
+  # ```
+
+  # CHANGED (data-platform): was `{}` (unset).
+  # Sized so exactly one worker fits an m5.large spot node with room for the
+  # kubelet and DaemonSets. Memory request == limit again, because a worker
+  # killed mid-query fails that query outright.
+  # CPU request is what the HPA measures against, so it doubles as the scaling
+  # baseline: at targetCPUUtilizationPercentage 50, a sustained 400m average
+  # triggers a scale-out.
+  resources:
+    requests:
+      cpu: "800m"
+      memory: "4Gi"
+    limits:
+      cpu: "1500m"
+      memory: "4Gi"
+  # worker.resources -- It is recommended not to specify default resources and
+  # to leave this as a conscious choice for the user. This also increases
+  # chances charts run on environments with little resources, such as Minikube.
+  # If you do want to specify resources, use the following example, and adjust
+  # it as necessary.
+  # @raw
+  # Example:
+  # ```yaml
+  #  limits:
+  #    cpu: 100m
+  #    memory: 128Mi
+  #  requests:
+  #    cpu: 100m
+  #    memory: 128Mi
+  # ```
+
+  livenessProbe: {}
+  # worker.livenessProbe -- [Liveness
+  # probe](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/#configure-probes)
+  # @raw
+  # Example:
+  # ```yaml
+  #  initialDelaySeconds: 20
+  #  periodSeconds: 10
+  #  timeoutSeconds: 5
+  #  failureThreshold: 6
+  #  successThreshold: 1
+  # ```
+  readinessProbe: {}
+  # worker.readinessProbe -- [Readiness
+  # probe](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/#configure-probes)
+  # @raw
+  # Example:
+  # ```yaml
+  #  initialDelaySeconds: 20
+  #  periodSeconds: 10
+  #  timeoutSeconds: 5
+  #  failureThreshold: 6
+  #  successThreshold: 1
+  # ```
+
+  startupProbe: {}
+  # worker.startupProbe -- [Startup
+  # probe](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/#configure-probes)
+  # @raw
+  # Example:
+  # ```yaml
+  #  initialDelaySeconds: 10
+  #  periodSeconds: 2
+  #  timeoutSeconds: 2
+  #  failureThreshold: 60
+  #  successThreshold: 1
+  # ```
+
+  lifecycle: {}
+  # worker.lifecycle -- Worker container [lifecycle
+  # events](https://kubernetes.io/docs/tasks/configure-pod-container/attach-handler-lifecycle-event/)
+  #
+  # Setting `worker.lifecycle` conflicts with `worker.gracefulShutdown`.
+  #
+  # @raw
+  # Example:
+  # ```yaml
+  #  preStop:
+  #    exec:
+  #      command: ["/bin/sh", "-c", "sleep 120"]
+  # ```
+
+  gracefulShutdown:
+    enabled: false
+    gracePeriodSeconds: 120
+  # worker.gracefulShutdown -- Configure [graceful
+  # shutdown](https://trino.io/docs/current/admin/graceful-shutdown.html) in order to ensure that workers terminate
+  # without affecting running queries, given a sufficient grace period. When enabled, the value of
+  # `worker.terminationGracePeriodSeconds` must be at least two times greater than the configured `gracePeriodSeconds`.
+  # Enabling `worker.gracefulShutdown` conflicts with `worker.lifecycle`. When a custom `worker.lifecycle` configuration
+  # needs to be used, graceful shutdown must be configured manually.
+  #
+  # @raw
+  # Example:
+  # ```yaml
+  #  gracefulShutdown:
+  #    enabled: true
+  #    gracePeriodSeconds: 120
+  # ```
+
+  terminationGracePeriodSeconds: 30
+
+  # CHANGED (data-platform): was `{}`, then `workload: batch` (spot), now back
+  # on the on-demand group. The reversal is deliberate and worth recording.
+  #
+  # The original reasoning was that "losing a worker fails the queries on it and
+  # the next query runs elsewhere", which sounded interruption-tolerant. It is
+  # not, for two reasons:
+  #
+  #   1. A failed query is user-visible. Spark retries a lost executor's work
+  #      silently and the job still succeeds; Trino returns an error to whoever
+  #      ran the query. Those are not the same kind of "tolerant".
+  #
+  #      Trino can survive worker loss, but only with fault-tolerant execution
+  #      (retry-policy=TASK plus an exchange manager spooling intermediate data
+  #      to S3), which is not configured here and costs latency on every query
+  #      because exchanges go through object storage. It is also not a complete
+  #      answer: trinodb/trino#19137 reports NO_NODES_AVAILABLE rather than a
+  #      retry when a worker pod disappears quickly.
+  #
+  #   2. There is one worker. "The next query runs elsewhere" assumes an
+  #      elsewhere exists. A reclaim leaves the cluster with zero workers and
+  #      every query failing until replacement capacity arrives.
+  #
+  # Moving the workers here also lets ng-spot sit at 0 nodes when idle -- it was
+  # pinned to a standing node only because Trino needed one -- so spot capacity
+  # is now bought only while a Spark job is actually running. Spark executors
+  # remain on spot: that is where the interruption tolerance is real and where
+  # the compute spend at TB scale actually lives.
+  nodeSelector:
+    workload: critical
+
+  # CHANGED (data-platform): was `[]`, then a spot toleration, now empty again.
+  # Nothing to tolerate on the on-demand group -- and leaving the toleration in
+  # place would let a worker drift back onto spot capacity whenever the
+  # scheduler found the on-demand nodes full, reintroducing the failure mode
+  # above at exactly the busiest moment.
+  tolerations: []
+
+  affinity: {}
+
+  topologySpreadConstraints: []
+  # worker.topologySpreadConstraints -- Configure [topology spread
+  # constraints](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/)
+  # to control how worker pods are spread across your cluster among failure-domains
+  # such as nodes, zones, and regions. This is a best practice for achieving high
+  # availability and preventing resource hotspots.
+  #
+  # @raw
+  # Example of spreading workers across hostnames and zones:
+  # ```yaml
+  # topologySpreadConstraints:
+  #   - maxSkew: 1
+  #     topologyKey: "kubernetes.io/hostname"
+  #     whenUnsatisfiable: "ScheduleAnyway"
+  #     labelSelector:
+  #       matchLabels:
+  #         app.kubernetes.io/name: trino
+  #         app.kubernetes.io/component: worker
+  #   - maxSkew: 1
+  #     topologyKey: "topology.kubernetes.io/zone"
+  #     whenUnsatisfiable: "DoNotSchedule"
+  #     labelSelector:
+  #       matchLabels:
+  #         app.kubernetes.io/name: trino
+  #         app.kubernetes.io/component: worker
+  # ```
+
+  additionalConfigFiles: {}
+  # worker.additionalConfigFiles -- Additional config files placed in the default configuration directory.
+  # Supports templating the files' contents with `tpl`.
+  # @raw
+  # Example:
+  # ```yaml
+  # secret.txt: |
+  #   secret-value={{- .Values.someValue }}
+  # ```
+
+  additionalVolumes: []
+  # worker.additionalVolumes -- One or more additional volume mounts to add to all workers.
+  # @raw
+  # Example:
+  # ```yaml
+  #  - name: extras
+  #    emptyDir: {}
+  # ```
+
+  additionalVolumeMounts: []
+  # worker.additionalVolumeMounts -- One or more additional volume mounts to add to all workers.
+  # @raw
+  # Example:
+  # ```yaml
+  #  - name: extras
+  #    mountPath: /usr/share/extras
+  #    readOnly: true
+  # ```
+
+  priorityClassName: ~
+
+  annotations: {}
+  # worker.annotations -- Annotations to add to the worker pods.
+  # @raw
+  # By default, the following annotations are added to the worker pods:
+  # - `checksum/access-control-config` - checksum of the worker access control config file;
+  # - `checksum/catalog-config` - checksum of the catalog config file;
+  # - `checksum/worker-config` - checksum of the worker config file.
+  # This allows for automatic rolling updates on configuration changes. This behaviour can be disabled by manually
+  # setting these annotations to fixed constants in the `worker.annotations` section.
+  # Example:
+  # ```yaml
+  #  annotations:
+  #    checksum/access-control-config: ""
+  #    checksum/catalog-config: ""
+  #    checksum/worker-config: ""
+  # ```
+
+  labels: {}
+
+  configMounts: []
+  # worker.configMounts -- Allows mounting additional Trino configuration
+  # files from Kubernetes config maps on all worker nodes.
+  # @raw
+  # Example:
+  # ```yaml
+  # - name: sample-config-mount
+  #   configMap: sample-config-mount
+  #   path: /config-mount/sample.json
+  #   subPath: sample.json
+  # ```
+
+  secretMounts: []
+  # worker.secretMounts -- Allows mounting additional Trino configuration
+  # files from Kubernetes secrets on all worker nodes.
+  # @raw
+  # Example:
+  # ```yaml
+  #  - name: sample-secret
+  #    secretName: sample-secret
+  #    path: /secrets/sample.json
+  #    subPath: sample.json
+  # ```
+
+kafka:
+  mountPath: "/etc/trino/schemas"
+  tableDescriptions: {}
+  # kafka.tableDescriptions -- Custom kafka table descriptions that will be mounted in mountPath.
+  # @raw
+  # Example:
+  # ```yaml
+  #  testschema.json: |-
+  #    {
+  #      "tableName": "testtable",
+  #      "schemaName": "testschema",
+  #      "topicName": "testtopic",
+  #      "key": {
+  #        "dataFormat": "json",
+  #        "fields": [
+  #          {
+  #            "name": "_key",
+  #            "dataFormat": "VARCHAR",
+  #            "type": "VARCHAR",
+  #            "hidden": "false"
+  #          }
+  #        ]
+  #      },
+  #      "message": {
+  #        "dataFormat": "json",
+  #        "fields": [
+  #          {
+  #            "name": "id",
+  #            "mapping": "id",
+  #            "type": "BIGINT"
+  #          },
+  #          {
+  #            "name": "test_field",
+  #            "mapping": "test_field",
+  #            "type": "VARCHAR"
+  #          }
+  #        ]
+  #      }
+  #    }
+  # ```
+
+# CHANGED (data-platform): enabled, with an explicit rule set.
+#
+# Trino publishes everything worth knowing over JMX and nothing over a native
+# Prometheus endpoint, so without this the platform's query engine is the one
+# component with no metrics at all -- which is the opposite of useful, because
+# it is also the component two teams share and contend for.
+#
+# What this answers that nothing else can: are Team A's 100 report queries
+# queued behind each other, is Team B getting the slot the resource groups
+# promise it, and is the memory pool full when a query fails.
+#
+# RMI is bound to localhost inside the pod (hostPort below) and the exporter
+# runs as a sidecar in the same pod, so nothing JMX is reachable from the
+# network. Only the exporter's HTTP port is, and only to Prometheus.
+jmx:
+  # -- Set to true to enable the RMI server to expose Trino's [JMX metrics](https://trino.io/docs/current/admin/jmx.html).
+  enabled: true
+  registryPort: 9080
+  serverPort: 9081
+  exporter:
+    # jmx.exporter.enabled -- Set to true to export JMX Metrics via HTTP for [Prometheus](https://github.com/prometheus/jmx_exporter) consumption
+    enabled: true
+    image: bitnamilegacy/jmx-exporter:1.4.0
+    # CHANGED (data-platform): Always -> IfNotPresent. `Always` re-pulls on
+    # every pod start, which puts a public registry on the critical path of a
+    # coordinator restart -- and this tag is pinned, so there is nothing new to
+    # fetch.
+    pullPolicy: IfNotPresent
+    port: 5556
+    # CHANGED (data-platform): was "".
+    #
+    # An empty config means the exporter walks every MBean Trino has. That is
+    # thousands of series per pod, most of them JVM internals nobody queries,
+    # and cardinality is what actually kills a small Prometheus -- not scrape
+    # frequency.
+    #
+    # The includeObjectNames below are the ones that answer the questions this
+    # platform gets asked. Everything else is deliberately not collected;
+    # adding a name here is cheap, and removing one after a month of ingest is
+    # not.
+    configProperties: |-
+      hostPort: localhost:{{- .Values.jmx.registryPort }}
+      startDelaySeconds: 0
+      ssl: false
+      lowercaseOutputName: false
+      lowercaseOutputLabelNames: false
+      autoExcludeObjectNameAttributes: true
+      includeObjectNames:
+        # Queries running, queued, failed, and how long they took. The
+        # resource-group design in this file is an assertion about queueing;
+        # this is the metric that shows whether it holds.
+        - "trino.execution:name=QueryManager"
+        - "trino.execution:name=SqlTaskManager"
+        - "trino.execution.resourcegroups:*"
+        # Memory pool exhaustion is the usual reason a query fails on a cluster
+        # this size, and it is invisible from the query error alone.
+        - "trino.memory:*"
+        # JVM heap and GC pauses, which is how "Trino got slow" is usually
+        # explained.
+        - "java.lang:type=Memory"
+        - "java.lang:type=GarbageCollector,*"
+        - "java.lang:type=Threading"
+      excludeObjectNameAttributes:
+        "java.lang:type=OperatingSystem":
+          - "ObjectName"
+        "java.lang:type=Runtime":
+          - "ClassPath"
+          - "SystemProperties"
+    # jmx.exporter.configProperties -- The string value is templated using `tpl`. The JMX config properties file
+    # is mounted to `/etc/jmx-exporter/jmx-exporter-config.yaml`.
+    # @raw
+    # Example:
+    # ```yaml
+    #  configProperties: |-
+    #     hostPort: localhost:{{- .Values.jmx.registryPort }}
+    #     startDelaySeconds: 0
+    #     ssl: false
+    #     lowercaseOutputName: false
+    #     lowercaseOutputLabelNames: false
+    #     includeObjectNames: ["java.lang:type=Threading"]
+    #     autoExcludeObjectNameAttributes: true
+    #     excludeObjectNameAttributes:
+    #       "java.lang:type=OperatingSystem":
+    #         - "ObjectName"
+    #       "java.lang:type=Runtime":
+    #         - "ClassPath"
+    #         - "SystemProperties"
+    #     rules:
+    #       - pattern: 'java\.lang<type=Threading><(.*)>ThreadCount: (.*)'
+    #         name: java_lang_Threading_ThreadCount
+    #         value: '$2'
+    #         help: 'ThreadCount (java.lang<type=Threading><>ThreadCount)'
+    #         type: UNTYPED
+    # ```
+    securityContext: {}
+    resources: {}
+    # jmx.exporter.resources -- It is recommended not to specify default resources
+    # and to leave this as a conscious choice for the user. This also increases
+    # chances charts run on environments with little resources, such as Minikube.
+    # If you do want to specify resources, use the following example, and adjust
+    # it as necessary.
+    # @raw
+    # Example:
+    # ```yaml
+    #  limits:
+    #    cpu: 100m
+    #    memory: 128Mi
+    #  requests:
+    #    cpu: 100m
+    #    memory: 128Mi
+    # ```
+  coordinator: {}
+  # jmx.coordinator -- Override JMX configurations for the Trino coordinator.
+  # @raw
+  # Example
+  # ```yaml
+  # coordinator:
+  #   enabled: true
+  #   exporter:
+  #     enabled: true
+  #     configProperties: |-
+  #       hostPort: localhost:{{- .Values.jmx.registryPort }}
+  #       startDelaySeconds: 0
+  #       ssl: false
+  # ```
+  worker: {}
+  # jmx.worker -- Override JMX configurations for the Trino workers.
+  # @raw
+  # Example
+  # ```yaml
+  # worker:
+  #   enabled: true
+  #   exporter:
+  #     enabled: true
+  # ```
+
+# CHANGED (data-platform): enabled.
+#
+# The ServiceMonitor is what tells Prometheus that the JMX exporter above
+# exists. Turning on the exporter without this produces a sidecar serving
+# metrics that nothing reads.
+#
+# This only works because monitoring is installed BEFORE Trino
+# (set_up_cluster/prod/06_monitoring_prod). The ServiceMonitor CRD has to exist
+# for this chart to create an object of that kind; with the ordering reversed,
+# `helm install trino` fails outright with `no matches for kind
+# "ServiceMonitor"`.
+serviceMonitor:
+  # serviceMonitor.enabled -- Set to true to create resources for the
+  # [prometheus-operator](https://github.com/prometheus-operator/prometheus-operator).
+  enabled: true
+
+  apiVersion: monitoring.coreos.com/v1
+  # serviceMonitor.labels -- Labels for serviceMonitor, so that Prometheus can select it
+  #
+  # This label is decoration in this cluster, not a selector that has to match.
+  # kube-prometheus-stack is configured with
+  # serviceMonitorSelectorNilUsesHelmValues: false, which means Prometheus
+  # discovers every ServiceMonitor regardless of labels. Left at its default
+  # (true) it would only pick up ServiceMonitors carrying ITS release labels,
+  # and this one -- created by a different chart -- would be silently ignored:
+  # no error, no target, just an empty graph.
+  labels:
+    prometheus: kube-prometheus
+  # serviceMonitor.interval -- The serviceMonitor web endpoint interval
+  interval: "30s"
+  # serviceMonitor.scrapeTimeout -- Maximum time to wait for a response.
+  # If empty or not set, uses the Prometheus global default.
+  scrapeTimeout: ""
+  coordinator: {}
+  # serviceMonitor.coordinator -- Override ServiceMonitor configurations for the Trino coordinator.
+  # @raw
+  # Example
+  # ```yaml
+  # coordinator:
+  #   enabled: true
+  #   labels:
+  #     prometheus: my-prometheus
+  # ```
+  worker: {}
+  # serviceMonitor.worker -- Override ServiceMonitor configurations for the Trino workers.
+  # @raw
+  # Example
+  # ```yaml
+  # worker:
+  #   enabled: true
+  #   labels:
+  #     prometheus: my-prometheus
+  # ```
+
+# -- Labels that get applied to every resource's metadata
+commonLabels: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  # ingress.hosts -- [Ingress
+  # rules](https://kubernetes.io/docs/concepts/services-networking/ingress/#ingress-rules).
+  # @raw
+  # Example:
+  # ```yaml
+  #  - host: trino.example.com
+  #    paths:
+  #      - path: /
+  #        pathType: ImplementationSpecific
+  # ```
+  tls: []
+  # ingress.tls -- Ingress
+  # [TLS](https://kubernetes.io/docs/concepts/services-networking/ingress/#tls)
+  # configuration.
+  # @raw
+  # Example:
+  # ```yaml
+  #  - secretName: chart-example-tls
+  #    hosts:
+  #      - chart-example.local
+  # ```
+
+gateway:
+  # gateway.enabled -- Set to true to create HTTPRoute resources for [Kubernetes Gateway API](https://gateway-api.sigs.k8s.io/).
+  # The Gateway API is the successor to the Ingress API and provides more advanced routing capabilities.
+  # @raw
+  # > [!NOTE]
+  # > - Requires Gateway API CRDs to be installed in the cluster
+  # > - Not recommended to use together with `ingress.enabled` (choose one or the other)
+  # > - Requires a Gateway resource to be configured separately
+  enabled: false
+  annotations: {}
+  # gateway.annotations -- Annotations to add to the HTTPRoute resource.
+  # @raw
+  # Example:
+  # ```yaml
+  #  gateway.networking.k8s.io/example: "value"
+  # ```
+  parentRefs: []
+  # gateway.parentRefs -- References to the Gateway resources that this HTTPRoute should attach to.
+  # @raw
+  # Example:
+  # ```yaml
+  #  - name: trino-gateway
+  #    namespace: gateway-system
+  #    sectionName: https
+  # ```
+  hostnames: []
+  # gateway.hostnames -- Hostnames to match for routing traffic.
+  # @raw
+  # Example:
+  # ```yaml
+  #  - trino.example.com
+  #  - trino-prod.example.com
+  # ```
+  rules: []
+  # gateway.rules -- HTTPRoute rules for routing traffic to Trino.
+  # Each rule can use either the simplified `path` format for basic routing,
+  # or the full `matches` format for advanced use cases.
+  # @raw
+  # Simple path-based routing example:
+  # ```yaml
+  #  - path:
+  #      type: PathPrefix
+  #      value: /
+  #    filters:
+  #      - type: RequestHeaderModifier
+  #        requestHeaderModifier:
+  #          set:
+  #            - name: X-Forwarded-Proto
+  #              value: https
+  # ```
+  # Advanced matching example with headers:
+  # ```yaml
+  #  - matches:
+  #      - path:
+  #          type: PathPrefix
+  #          value: /ui
+  #        headers:
+  #          - name: X-Custom-Header
+  #            value: custom-value
+  #    filters:
+  #      - type: RequestHeaderModifier
+  #        requestHeaderModifier:
+  #          set:
+  #            - name: X-Forwarded-Proto
+  #              value: https
+  # ```
+
+networkPolicy:
+  # networkPolicy.enabled -- Set to true to enable Trino pod protection with a
+  # [NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/).
+  # By default, the NetworkPolicy will only allow Trino pods to communicate with each other.
+  # @raw
+  # > [!NOTE]
+  # > - NetworkPolicies cannot block the ingress traffic coming directly
+  # > from the Kubernetes node on which the Pod is running,
+  # > and are thus incompatible with services of type `NodePort`.
+  # > - When using NetworkPolicies together with JMX metrics export,
+  # > additional ingress rules might be required to allow metric scraping.
+  enabled: false
+  # networkPolicy.ingress -- Additional ingress rules to apply to the Trino pods.
+  # @raw
+  # Example:
+  # ```yaml
+  #  - from:
+  #      - ipBlock:
+  #          cidr: 172.17.0.0/16
+  #          except:
+  #            - 172.17.1.0/24
+  #      - namespaceSelector:
+  #          matchLabels:
+  #            kubernetes.io/metadata.name: prometheus
+  #      - podSelector:
+  #          matchLabels:
+  #            role: backend-app
+  #    ports:
+  #      - protocol: TCP
+  #        port: 8080
+  #      - protocol: TCP
+  #        port: 5556
+  # ```
+  ingress: []
+  # networkPolicy.egress -- Egress rules to apply to the Trino pods.
+  # @raw
+  # Example:
+  # ```yaml
+  #  - to:
+  #      - podSelector:
+  #          matchLabels:
+  #            role: log-ingestor
+  #    ports:
+  #      - protocol: TCP
+  #        port: 9999
+  # ```
+  egress: []

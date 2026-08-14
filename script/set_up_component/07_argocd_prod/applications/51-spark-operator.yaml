@@ -1,0 +1,55 @@
+# spark-operator, managed by Argo CD.
+#
+# Watches for SparkApplication objects and turns them into driver
+# pods. The `spark` namespace, its ServiceAccount and its RBAC are
+# created by the script above and are deliberately NOT here: they
+# grant the operator the right to create pods, which is a permission
+# decision rather than a deployment.
+#
+# RUN THESE FIRST -- Argo CD cannot
+# ----------------------------------
+#   script/set_up_*/prod/06_spark_prod/00_create_spark_irsa_prod.sh
+#   script/set_up_*/prod/06_spark_prod/01_create_namespace_and_sa_prod.sh
+#   script/set_up_*/prod/06_spark_prod/04_create_image_pull_secret_prod.sh
+#   script/set_up_*/prod/06_spark_prod/05_create_polaris_credential_prod.sh
+#
+# Argo CD reconciles Kubernetes objects against git and nothing else. It cannot
+# create an IAM role, read AWS Secrets Manager, or tag an Auto Scaling group.
+# That split is not a limitation to work around: anything holding a credential
+# stays out of git by construction.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: spark-operator
+  namespace: argocd
+  annotations:
+    # Argo CD waits for a wave to report Healthy -- not merely Synced -- before
+    # starting the next, so ordering here is guaranteed rather than raced.
+    argocd.argoproj.io/sync-wave: "20"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/nopega/ice-berg-platform.git
+    targetRevision: main
+    path: script/set_up_component/06_spark_prod/chart/spark-operator
+    helm:
+      # The vendored values.yaml, unchanged. Every deviation from upstream is
+      # commented in place there and greppable with "data-platform)" -- there is
+      # no second overrides file to keep in step.
+      valueFiles:
+        - values.yaml
+      releaseName: spark-operator
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: spark-operator
+  syncPolicy:
+    # No `automated` block, deliberately. Every one of these is currently a
+    # `helm install` release, and Argo CD applies rendered manifests without
+    # talking to Helm -- so for a while there are two owners of the same
+    # objects. Sync each one by hand, confirm it took ownership, then enable
+    # automation per component.
+    syncOptions:
+      - CreateNamespace=true

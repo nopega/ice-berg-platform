@@ -1,0 +1,56 @@
+# airflow, managed by Argo CD.
+#
+# The scheduler. Last but one, because a DAG that fires the moment
+# Airflow starts should find Polaris, Trino, Harbor and the Spark
+# operator already there.
+# 
+# NOT covered by this Application: the StatsD ServiceMonitor. The
+# chart ships none, so 02_install_airflow_prod.sh applies
+# statsd-servicemonitor.yaml separately -- see the note in that file.
+#
+# RUN THESE FIRST -- Argo CD cannot
+# ----------------------------------
+#   script/set_up_*/prod/04_airflow_prod/00_create_airflow_irsa_prod.sh
+#   script/set_up_*/prod/04_airflow_prod/01_create_airflow_secrets_prod.sh
+#   script/set_up_*/prod/04_airflow_prod/04_create_smtp_secret_prod.sh
+#
+# Argo CD reconciles Kubernetes objects against git and nothing else. It cannot
+# create an IAM role, read AWS Secrets Manager, or tag an Auto Scaling group.
+# That split is not a limitation to work around: anything holding a credential
+# stays out of git by construction.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: airflow
+  namespace: argocd
+  annotations:
+    # Argo CD waits for a wave to report Healthy -- not merely Synced -- before
+    # starting the next, so ordering here is guaranteed rather than raced.
+    argocd.argoproj.io/sync-wave: "20"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/nopega/ice-berg-platform.git
+    targetRevision: main
+    path: script/set_up_component/04_airflow_prod/chart/airflow
+    helm:
+      # The vendored values.yaml, unchanged. Every deviation from upstream is
+      # commented in place there and greppable with "data-platform)" -- there is
+      # no second overrides file to keep in step.
+      valueFiles:
+        - values.yaml
+      releaseName: airflow
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: airflow
+  syncPolicy:
+    # No `automated` block, deliberately. Every one of these is currently a
+    # `helm install` release, and Argo CD applies rendered manifests without
+    # talking to Helm -- so for a while there are two owners of the same
+    # objects. Sync each one by hand, confirm it took ownership, then enable
+    # automation per component.
+    syncOptions:
+      - CreateNamespace=true

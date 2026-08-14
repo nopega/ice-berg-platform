@@ -1,0 +1,56 @@
+# cluster-autoscaler, managed by Argo CD.
+#
+# Makes `ng-spot desiredCapacity: 0` a design rather than a comment.
+# Ships both a ServiceMonitor and a PrometheusRule, so it needs the
+# CRDs from the monitoring wave.
+# 
+# The chart version is pinned to the cluster's Kubernetes MINOR on
+# purpose -- it links the upstream scheduler code and replays
+# scheduling decisions against a simulated node. targetRevision is a
+# branch here, so a chart bump lands the moment it is pushed; the
+# assertion that catches a mismatch lives in the install script.
+#
+# RUN THESE FIRST -- Argo CD cannot
+# ----------------------------------
+#   script/set_up_*/prod/10_cluster_autoscaler_prod/00_create_autoscaler_irsa_and_tags_prod.sh
+#
+# Argo CD reconciles Kubernetes objects against git and nothing else. It cannot
+# create an IAM role, read AWS Secrets Manager, or tag an Auto Scaling group.
+# That split is not a limitation to work around: anything holding a credential
+# stays out of git by construction.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cluster-autoscaler
+  namespace: argocd
+  annotations:
+    # Argo CD waits for a wave to report Healthy -- not merely Synced -- before
+    # starting the next, so ordering here is guaranteed rather than raced.
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/nopega/ice-berg-platform.git
+    targetRevision: main
+    path: script/set_up_cluster/10_cluster_autoscaler_prod/chart/cluster-autoscaler
+    helm:
+      # The vendored values.yaml, unchanged. Every deviation from upstream is
+      # commented in place there and greppable with "data-platform)" -- there is
+      # no second overrides file to keep in step.
+      valueFiles:
+        - values.yaml
+      releaseName: cluster-autoscaler
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    # No `automated` block, deliberately. Every one of these is currently a
+    # `helm install` release, and Argo CD applies rendered manifests without
+    # talking to Helm -- so for a while there are two owners of the same
+    # objects. Sync each one by hand, confirm it took ownership, then enable
+    # automation per component.
+    syncOptions:
+      - CreateNamespace=true

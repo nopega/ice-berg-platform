@@ -1,0 +1,66 @@
+# trino, managed by Argo CD.
+#
+# The query engine. After Polaris because it resolves tables through
+# it, and after monitoring because it creates a ServiceMonitor for
+# the JMX exporter.
+# 
+# The password file and internal shared secret are generated into a
+# Kubernetes Secret by the script above. Syncing without it gives a
+# coordinator that starts and rejects every login -- which reads as a
+# wrong password rather than a missing file.
+#
+# RUN THESE FIRST -- Argo CD cannot
+# ----------------------------------
+#   script/set_up_*/prod/02_trino_prod/01_create_trino_secret_prod.sh
+#   script/set_up_*/prod/02_trino_prod/02_create_trino_auth_secrets_prod.sh
+#
+# Argo CD reconciles Kubernetes objects against git and nothing else. It cannot
+# create an IAM role, read AWS Secrets Manager, or tag an Auto Scaling group.
+# That split is not a limitation to work around: anything holding a credential
+# stays out of git by construction.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: trino
+  namespace: argocd
+  annotations:
+    # Argo CD waits for a wave to report Healthy -- not merely Synced -- before
+    # starting the next, so ordering here is guaranteed rather than raced.
+    argocd.argoproj.io/sync-wave: "10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/nopega/ice-berg-platform.git
+    targetRevision: main
+    path: script/set_up_component/02_trino_prod/chart/trino
+    helm:
+      # The vendored values.yaml, unchanged. Every deviation from upstream is
+      # commented in place there and greppable with "data-platform)" -- there is
+      # no second overrides file to keep in step.
+      valueFiles:
+        - values.yaml
+      releaseName: trino
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: data-platform
+  syncPolicy:
+    # No `automated` block, deliberately. Every one of these is currently a
+    # `helm install` release, and Argo CD applies rendered manifests without
+    # talking to Helm -- so for a while there are two owners of the same
+    # objects. Sync each one by hand, confirm it took ownership, then enable
+    # automation per component.
+    syncOptions:
+      - CreateNamespace=true
+  ignoreDifferences:
+    # The chart enables HPA for the workers, so replicas is owned by
+    # the autoscaler at runtime. Reconciling it back to git would undo a
+    # scale-up during Team A's 10:00 report burst -- Argo CD fighting the
+    # HPA, with the queries losing.
+    - group: apps
+      kind: Deployment
+      name: trino-worker
+      jsonPointers:
+        - /spec/replicas

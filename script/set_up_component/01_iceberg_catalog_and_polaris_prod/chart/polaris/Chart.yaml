@@ -1,0 +1,29 @@
+annotations:
+  artifacthub.io/category: database
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/links: |
+    - name: Homepage
+      url: https://polaris.apache.org/
+    - name: Source Code
+      url: https://github.com/apache/polaris
+    - name: Documentation
+      url: https://polaris.apache.org/releases/1.5.0/
+    - name: Support
+      url: https://github.com/apache/polaris/issues
+apiVersion: v2
+appVersion: 1.5.0
+description: A Helm chart for Apache Polaris
+home: https://polaris.apache.org/
+icon: https://raw.githubusercontent.com/apache/polaris/main/site/static/img/logos/polaris-brandmark.png
+keywords:
+- polaris
+- iceberg
+maintainers:
+- email: dev@polaris.apache.org
+  name: Apache Polaris PMC
+  url: https://polaris.apache.org/
+name: polaris
+sources:
+- https://github.com/apache/polaris
+type: application
+version: 1.5.0

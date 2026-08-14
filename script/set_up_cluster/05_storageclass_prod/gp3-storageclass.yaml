@@ -1,0 +1,50 @@
+# gp3 StorageClass -- the cluster's default
+#
+# EKS ships the aws-ebs-csi-driver addon (see eks-cluster.yaml) but does NOT
+# create a StorageClass for it. The consequence is not an error: a PVC is
+# accepted, stays Pending forever, and the pod that wants it reports
+#
+#   0/3 nodes are available: pod has unbound immediate PersistentVolumeClaims
+#
+# which reads like a scheduling problem rather than a missing cluster object.
+# This file closes that gap once for every component that follows.
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    # Makes this the class used by any PVC that does not name one. Harbor's
+    # subcharts (Postgres, Redis, trivy) all omit storageClassName by default,
+    # so without this every one of them would need patching individually.
+    storageclass.kubernetes.io/is-default-class: "true"
+
+provisioner: ebs.csi.aws.com
+
+# gp3 over gp2, deliberately: gp3 is ~20% cheaper per GB and its 3000 IOPS /
+# 125 MB/s baseline is included at no extra cost and independent of volume
+# size. gp2 ties IOPS to size (3 IOPS/GB), so matching gp3's baseline on gp2
+# would mean provisioning a 1TB volume nobody needs.
+parameters:
+  type: gp3
+  encrypted: "true"
+  fsType: ext4
+
+# WaitForFirstConsumer, not Immediate. An EBS volume exists in exactly one
+# Availability Zone and can only attach to a node in that same AZ. With
+# Immediate, the volume is created as soon as the PVC appears -- before the
+# scheduler has chosen a node -- so the AZ is picked blind. If the pod is
+# later scheduled elsewhere it can never attach, and the pod stays Pending
+# with a volume-node-affinity conflict that looks unrelated to this file.
+# WaitForFirstConsumer delays provisioning until the node is known.
+volumeBindingMode: WaitForFirstConsumer
+
+# Allows `kubectl patch pvc` to grow a volume in place. Cannot be enabled
+# retroactively on volumes already bound under a class that lacked it, so it
+# is set now rather than when someone actually runs out of space.
+allowVolumeExpansion: true
+
+# Retain would leave orphaned EBS volumes billing after a namespace is deleted.
+# Everything using this class (Harbor's DB, Prometheus TSDB) holds data that is
+# either reproducible or explicitly backed up elsewhere.
+reclaimPolicy: Delete

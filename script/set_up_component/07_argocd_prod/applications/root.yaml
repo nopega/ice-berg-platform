@@ -1,0 +1,50 @@
+# The ONE object applied by hand. Ever.
+#
+#   kubectl apply -f root.yaml
+#
+# Its source is the DIRECTORY holding the other Applications, not a chart.
+# Argo CD applies every manifest it finds there, and each of those is itself an
+# Application that Argo CD then reconciles.
+#
+# The property this buys: git is the complete list of what runs. Adding a
+# component is adding a file, and there is no second step anyone can forget.
+#
+# A list inside this file would mean two places to edit when adding a
+# component, and the second one is the one people forget. A directory cannot
+# drift from itself.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-root
+  namespace: argocd
+  finalizers:
+    # Without this, deleting the root orphans every child: they stay in the
+    # cluster, still reconciling, with nothing pointing at them.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/nopega/ice-berg-platform.git
+    targetRevision: main
+    path: script/set_up_component/07_argocd_prod/applications
+    directory:
+      recurse: false
+      # This file lives in the directory it watches. Without the exclude, Argo
+      # CD manages itself -- legal, but it makes "who changed this" answerable
+      # only by reading two histories.
+      exclude: root.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      selfHeal: true
+      # TRUE here, and absent on every child below.
+      #
+      # Here it means: delete an Application file and the Application object
+      # goes. It does NOT delete that component's resources, because the
+      # children do not enable prune. So the blast radius of a mistake at this
+      # level is a component nobody is managing -- not a component that is
+      # gone.
+      prune: true

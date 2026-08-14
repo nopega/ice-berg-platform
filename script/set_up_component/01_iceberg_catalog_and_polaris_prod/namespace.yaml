@@ -1,0 +1,12 @@
+# namespace.yaml
+#
+# Single namespace for every data-platform component (Iceberg Catalog,
+# Trino, Airflow, Spark jobs, Prometheus/Grafana). Kept in one namespace
+# rather than one-per-component since NetworkPolicy and RBAC in this
+# take-home are scoped at the namespace level (see docs/SECURITY_GOVERNANCE.md)
+# — splitting further would add operational overhead without a real
+# multi-team isolation need here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: data-platform

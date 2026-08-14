@@ -1,0 +1,164 @@
+# cloudflared — the platform's only inbound path from the internet.
+#
+# WHY PLAIN MANIFESTS AND NOT A VENDORED HELM CHART
+# --------------------------------------------------
+# Every other component here installs from a chart pulled into ./chart/,
+# because each one has an official chart worth reusing. Cloudflare publishes
+# none for cloudflared, and the whole deployment is one Deployment plus one
+# Secret. Writing a chart to template two objects would add indirection with
+# nothing behind it, so the manifests are checked in directly.
+#
+# WHY A TUNNEL INSTEAD OF A LOAD BALANCER
+# ----------------------------------------
+# The alternative is an ALB or NLB with an Ingress controller, which means a
+# public IP, an inbound security-group rule, a certificate to manage, and
+# roughly $20/month per load balancer before any traffic.
+#
+# cloudflared dials *outbound* to Cloudflare and holds the connection open.
+# Nothing listens on a public address, the security group needs no inbound
+# rule, and TLS terminates at Cloudflare's edge with a certificate that renews
+# itself. It is both cheaper and a smaller attack surface: an attacker cannot
+# port-scan a service that has no public port.
+#
+# The trade-off, stated plainly: this makes Cloudflare a hard dependency for
+# reaching the platform. If Cloudflare is down, the Airflow UI and Harbor are
+# unreachable from outside. Nothing *inside* the cluster is affected -- DAGs
+# keep running, Trino keeps serving queries to in-cluster clients, and
+# `kubectl port-forward` still works for an operator -- so the blast radius is
+# "humans cannot use the web UIs", not "the platform is down".
+#
+# ROUTING LIVES IN CLOUDFLARE, NOT IN THIS FILE
+# ----------------------------------------------
+# This is a remotely-managed tunnel: the token identifies it, and the
+# hostname-to-service mapping is configured in the Cloudflare dashboard under
+# the tunnel's Public Hostname tab. There is deliberately no config.yaml or
+# ingress block here.
+#
+# The upside is that adding a hostname needs no redeploy. The downside is real
+# and worth naming: that routing is *not* in git, so this repository does not
+# fully describe what is exposed. The mapping is written down in
+# docs/EXTERNAL_ACCESS.md so it is at least reviewable, and the tunnel can be
+# converted to a locally-managed one (config file in a ConfigMap) if that
+# trade stops being acceptable.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloudflared
+  labels:
+    app.kubernetes.io/name: cloudflared
+    app.kubernetes.io/part-of: data-platform
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+  namespace: cloudflared
+  labels:
+    app.kubernetes.io/name: cloudflared
+    app.kubernetes.io/part-of: data-platform
+spec:
+  # Two replicas, not one. A tunnel supports several connectors at once and
+  # Cloudflare load-balances across them, so this is genuine redundancy rather
+  # than an idle standby: a rolling update or a node replacement never drops
+  # the only way in. Two of these cost ~100m CPU total.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloudflared
+        app.kubernetes.io/part-of: data-platform
+    spec:
+      # On-demand only. Putting the sole inbound path on Spot would mean a
+      # reclaim can take the UI offline, which defeats the point of running two
+      # replicas for availability.
+      nodeSelector:
+        workload: critical
+
+      # Spread the two replicas across nodes. Without this the scheduler is
+      # free to place both on the same node, and a single node replacement
+      # takes the tunnel down entirely -- the exact failure two replicas were
+      # meant to prevent. `preferred` rather than `required` so a single-node
+      # cluster still schedules both instead of leaving one Pending.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: cloudflared
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: cloudflared
+          # Pinned, not `latest`. `latest` would silently change the binary on
+          # every pod restart, which for the component that controls external
+          # access is exactly where an unnoticed change is least welcome.
+          image: cloudflare/cloudflared:2026.7.3
+          imagePullPolicy: IfNotPresent
+          args:
+            - tunnel
+            # The image self-updates by default and restarts itself when it
+            # does. That turns "pinned image tag" into a lie and makes a pod's
+            # running version depend on how long it has been up.
+            - --no-autoupdate
+            # Send logs and metrics to Cloudflare's edge over the same
+            # connection rather than requiring a second outbound path.
+            - --metrics
+            - 0.0.0.0:2000
+            - run
+          env:
+            - name: TUNNEL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflare-tunnel-token
+                  key: token
+          ports:
+            - name: metrics
+              containerPort: 2000
+              protocol: TCP
+          # cloudflared exposes /ready on the metrics port, which reports
+          # whether it currently holds connections to Cloudflare's edge. That
+          # is the property worth probing: a process that is running but has
+          # lost its tunnel serves nothing, and without this probe it would
+          # keep receiving traffic it cannot forward.
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

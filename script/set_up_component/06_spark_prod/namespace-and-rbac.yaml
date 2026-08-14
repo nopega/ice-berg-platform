@@ -1,0 +1,162 @@
+# Namespace, ServiceAccount and RBAC for Spark jobs.
+#
+# The IRSA role ARN below is substituted by 01_create_namespace_and_sa_prod.sh
+# rather than hardcoded, because it contains the AWS account ID.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spark
+  labels:
+    # Lets the Spark Operator be told to watch this namespace specifically,
+    # rather than every namespace in the cluster. Watching everything means a
+    # SparkApplication accidentally created in `default` would run with
+    # whatever permissions happen to exist there.
+    data-platform/purpose: spark-jobs
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark
+  namespace: spark
+  annotations:
+    # Substituted at apply time.
+    eks.amazonaws.com/role-arn: __SPARK_ROLE_ARN__
+---
+# WHY A SPARK DRIVER NEEDS RBAC AT ALL
+# --------------------------------------
+# In cluster mode the driver is not just a process that computes -- it is the
+# thing that ASKS KUBERNETES for its executors. It creates executor pods,
+# watches them, and deletes them when the job ends. Without these rules the
+# driver starts, connects to the API server, is refused, and the job hangs
+# with "Initial job has not accepted any resources" -- which reads like a
+# capacity problem and is actually a permissions one.
+#
+# Role, not ClusterRole: everything a driver creates lives in its own
+# namespace. A ClusterRole would let a Spark job create pods anywhere.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-driver
+  namespace: spark
+rules:
+  # Executors. `delete` matters as much as `create`: without it, executors
+  # from a finished job stay Running and keep holding nodes.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection"]
+
+  # The driver reads its own pod to learn its UID, which it then sets as the
+  # ownerReference on every executor. That is what makes executors disappear
+  # automatically if the driver is killed rather than being orphaned.
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/status"]
+    verbs: ["get", "list"]
+
+  # The headless Service executors use to reach the driver. Spark creates it
+  # itself; it is not pre-created here because its name embeds the
+  # application's generated ID.
+  # deletecollection, not just delete, on all three resources below.
+  #
+  # Spark's shutdown path does not delete objects by name. KubernetesCluster
+  # SchedulerBackend.stop() issues a DELETE against the whole collection
+  # filtered by `spark-app-selector=<app-id>`, which the API server authorises
+  # as the separate `deletecollection` verb. Granting only `delete` produces a
+  # job that runs correctly and then logs three 403 stack traces on the way
+  # out:
+  #
+  #   services is forbidden: User "system:serviceaccount:spark:spark" cannot
+  #   deletecollection resource "services" in the namespace "spark"
+  #
+  # The job's own exit code is unaffected, which is what makes this easy to
+  # ignore -- and the cost of ignoring it is that the headless Service and the
+  # config maps of every run that ever executed stay in the namespace forever.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection"]
+
+  # ConfigMaps carry the Spark configuration and the driver's own properties
+  # file into the executors.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
+
+  # PersistentVolumeClaims: only needed if a job enables dynamic PVCs for
+  # shuffle spill. Not used today, and included because the alternative --
+  # discovering it is missing during a job that is already spilling -- is a
+  # failure at the worst possible moment.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-driver
+  namespace: spark
+subjects:
+  - kind: ServiceAccount
+    name: spark
+    namespace: spark
+roleRef:
+  kind: Role
+  name: spark-driver
+  apiGroup: rbac.authorization.k8s.io
+---
+# Lets Airflow's KubernetesExecutor task pods submit jobs into this namespace
+# WITHOUT giving them the ability to run arbitrary pods here.
+#
+# The distinction is deliberate: Airflow may create a SparkApplication (a
+# declaration of intent that the operator validates and turns into pods), but
+# it may not create a Pod directly. A compromised DAG can therefore ask for a
+# Spark job; it cannot ask for a shell.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: airflow-spark-submitter
+  namespace: spark
+rules:
+  - apiGroups: ["sparkoperator.k8s.io"]
+    resources: ["sparkapplications", "sparkapplications/status"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  - apiGroups: ["sparkoperator.k8s.io"]
+    resources: ["scheduledsparkapplications", "scheduledsparkapplications/status"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  # Read on pods and their logs, so the Airflow task can stream the driver's
+  # output into the Airflow UI and report a real error message instead of just
+  # "the job failed".
+  #
+  # `patch` is here and `create` deliberately is not. SparkKubernetesOperator
+  # writes an `already_checked` label onto a driver pod it has finished with,
+  # so that a retry starts a new job instead of reattaching to the dead one --
+  # without it, a retried task latches onto the previous failure and reports it
+  # again, forever. Patching a label on an existing pod is a long way from
+  # being able to create one: Airflow still cannot start a container of its own
+  # choosing in this namespace, which is the property this Role exists to
+  # preserve.
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: airflow-spark-submitter
+  namespace: spark
+subjects:
+  # Every ServiceAccount the Airflow chart creates. KubernetesExecutor task
+  # pods run as `airflow-worker`; naming it alone would break silently if the
+  # chart renamed it, so all of them are bound and the Role is narrow instead.
+  - kind: ServiceAccount
+    name: airflow-worker
+    namespace: airflow
+  - kind: ServiceAccount
+    name: airflow-scheduler
+    namespace: airflow
+roleRef:
+  kind: Role
+  name: airflow-spark-submitter
+  apiGroup: rbac.authorization.k8s.io

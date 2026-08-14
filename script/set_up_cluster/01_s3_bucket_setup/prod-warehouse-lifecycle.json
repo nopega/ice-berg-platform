@@ -1,0 +1,74 @@
+{
+  "Rules": [
+    {
+      "ID": "financial-data-tiering",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "bronze/financial/" },
+      "Transitions": [
+        { "Days": 90,   "StorageClass": "STANDARD_IA" },
+        { "Days": 365,  "StorageClass": "GLACIER_IR" },
+        { "Days": 1095, "StorageClass": "DEEP_ARCHIVE" }
+      ]
+    },
+    {
+      "ID": "transactional-data-tiering",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "bronze/transactional/" },
+      "Transitions": [
+        { "Days": 90,  "StorageClass": "STANDARD_IA" },
+        { "Days": 365, "StorageClass": "GLACIER_IR" }
+      ],
+      "Expiration": { "Days": 1095 }
+    },
+    {
+      "ID": "operational-data-expiry",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "bronze/operational/" },
+      "Transitions": [
+        { "Days": 90, "StorageClass": "STANDARD_IA" }
+      ],
+      "Expiration": { "Days": 180 }
+    },
+    {
+      "ID": "log-table-expiry",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "bronze/log/" },
+      "Transitions": [
+        { "Days": 90, "StorageClass": "STANDARD_IA" }
+      ],
+      "Expiration": { "Days": 365 }
+    },
+    {
+      "ID": "derived-data-tiering",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "silver/derived/" },
+      "Transitions": [
+        { "Days": 90,  "StorageClass": "STANDARD_IA" },
+        { "Days": 365, "StorageClass": "GLACIER_IR" }
+      ],
+      "Expiration": { "Days": 1095 }
+    },
+    {
+      "ID": "aggregate-data-tiering",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "gold/aggregate/" },
+      "Transitions": [
+        { "Days": 90,  "StorageClass": "STANDARD_IA" },
+        { "Days": 365, "StorageClass": "GLACIER_IR" }
+      ],
+      "Expiration": { "Days": 1825 }
+    },
+    {
+      "ID": "abort-incomplete-multipart-uploads",
+      "Status": "Enabled",
+      "Filter": {},
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    },
+    {
+      "ID": "cleanup-noncurrent-versions",
+      "Status": "Enabled",
+      "Filter": {},
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 30 }
+    }
+  ]
+}

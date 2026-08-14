@@ -200,6 +200,19 @@ configs:
     # -- Create the argocd-cm configmap for [declarative setup]
     create: true
 
+    # ADDED (data-platform): the external URL.
+    #
+    # Argo CD builds absolute links from this -- the "open application" links in
+    # the UI, and the redirect target after login. Left unset it falls back to
+    # the request host, which works by accident behind a plain Service and stops
+    # working the moment anything rewrites or redirects.
+    #
+    # https, even though the ALB forwards plain HTTP to the pod. This describes
+    # the URL the user typed, not the hop between the load balancer and the
+    # container. Setting http here produces mixed-content warnings and a login
+    # loop.
+    url: https://argocd.nopega.net
+
     # -- Annotations to be added to argocd-cm configmap
     annotations: {}
 

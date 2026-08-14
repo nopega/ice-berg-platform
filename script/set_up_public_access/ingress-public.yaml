@@ -282,3 +282,150 @@ spec:
                 name: kube-prometheus-stack-grafana
                 port:
                   number: 80
+---
+# Argo CD. Added last, and the reason is worth recording because it is the kind
+# of thing that reads as a tooling fault.
+#
+# `kubectl port-forward` drops the connection during a sync that applies dozens
+# of resources. The UI reports "Request has been terminated: the network is
+# offline, Origin is not allowed by Access-Control-Allow-Origin, the page is
+# being unloaded" -- none of which is what happened. The tunnel timed out.
+#
+# THE SECURITY TRADE, STATED PLAINLY
+# ------------------------------------
+# Argo CD can deploy anything into this cluster. Whoever reaches this UI
+# effectively reaches the cluster, which is a different exposure from Grafana
+# (read-only) or Trino (a query engine behind its own authorisation rules).
+#
+# What protects it here: the ALB's inbound-cidrs allowlist, which is a network
+# control rather than a login form, plus Argo CD's own admin password. What
+# SHOULD also be here for anything longer-lived is Cloudflare Access in front,
+# so that reaching the login page at all requires an identity. That is not done
+# and should not be claimed.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd-public
+  namespace: argocd
+  annotations:
+    alb.ingress.kubernetes.io/group.name: data-platform-public
+    alb.ingress.kubernetes.io/group.order: "50"
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: __CERT_ARN__
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/inbound-cidrs: __INBOUND_CIDRS__
+
+    # HTTP, not HTTPS, to the pod. The chart runs argocd-server with
+    # `server.insecure: true` precisely so the ALB can terminate TLS and speak
+    # plain HTTP to it. Without that flag the server serves TLS itself, the ALB
+    # health check speaks HTTP to a TLS port, every target is marked unhealthy,
+    # and the Ingress returns 503 with nothing in the Argo CD log to explain it.
+    alb.ingress.kubernetes.io/backend-protocol: HTTP
+
+    # Answers 200 without a session. Pointing at / would follow the redirect to
+    # the login page and mark targets unhealthy whenever nobody is logged in.
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+
+    # Identical to every other Ingress in this group, character for character.
+    # The controller merges them into one load balancer model and refuses to
+    # build it at all if two disagree -- reported as "conflicting load balancer
+    # attributes", with the newest Ingress left without an ADDRESS while the
+    # others keep working. That reads like the new one failed on its own.
+    #
+    # 600s also happens to be what a large Argo CD sync needs; the default 60s
+    # is close to the timeout that made port-forward unusable in the first
+    # place.
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=600
+    alb.ingress.kubernetes.io/tags: Project=data-platform,Environment=prod
+spec:
+  ingressClassName: alb
+  rules:
+    - host: argocd.nopega.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: argocd-server
+                port:
+                  number: 80
+---
+# Prometheus.
+#
+# NOT for dashboards -- Grafana renders these same metrics and has a login.
+# This is for the two things Grafana cannot do: writing and debugging PromQL
+# against the raw series, and reading /targets when something is not being
+# scraped. Both were done by `kubectl port-forward` repeatedly while building
+# this platform, including several times in one afternoon chasing why the
+# cluster autoscaler produced no series.
+#
+# NO AUTHENTICATION. THIS IS THE TRADE, STATED PLAINLY.
+# -------------------------------------------------------
+# Prometheus has no login and never has. What protects it here is the ALB's
+# inbound-cidrs allowlist -- a network control, not an identity one. Anyone
+# reaching it can run any query and read every metric the cluster produces:
+# node names, namespaces, pod names, query rates, which is a map of the
+# platform's internals.
+#
+# What it CANNOT do is destructive. `enableAdminAPI: false` in the monitoring
+# values means /api/v1/admin/tsdb/* -- delete_series, clean_tombstones,
+# snapshot -- returns 404. That flag is the difference between exposing a
+# read-only console and exposing a delete button, and it is worth re-checking
+# before anyone changes it.
+#
+# For anything longer-lived than this, Cloudflare Access in front is the answer,
+# the same as it is for Grafana and Argo CD.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: prometheus-public
+  namespace: monitoring
+  annotations:
+    alb.ingress.kubernetes.io/group.name: data-platform-public
+    alb.ingress.kubernetes.io/group.order: "60"
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: __CERT_ARN__
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/inbound-cidrs: __INBOUND_CIDRS__
+
+    # Answers 200 with no session and no redirect, which is what a health check
+    # needs. / returns the console HTML and would also work, but this is
+    # cheaper and unambiguous.
+    alb.ingress.kubernetes.io/healthcheck-path: /-/healthy
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+
+    # Identical on every Ingress in this group, character for character. The
+    # controller merges them into one load balancer model and refuses to build
+    # it at all if two disagree -- reported as "conflicting load balancer
+    # attributes", leaving the newest Ingress with no ADDRESS while the others
+    # keep working, which reads like the new one failed on its own.
+    #
+    # 600s is also what a wide range query needs; the 60s default would cut off
+    # exactly the queries worth running from here.
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=600
+    alb.ingress.kubernetes.io/tags: Project=data-platform,Environment=prod
+spec:
+  ingressClassName: alb
+  rules:
+    - host: prometheus.nopega.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kube-prometheus-stack-prometheus
+                port:
+                  number: 9090

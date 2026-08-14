@@ -12,7 +12,7 @@
 #
 # RUN THESE FIRST -- Argo CD cannot
 # ----------------------------------
-#   script/set_up_*/prod/10_cluster_autoscaler_prod/00_create_autoscaler_irsa_and_tags_prod.sh
+#   script/set_up_*/prod/09_cluster_autoscaler_prod/00_create_autoscaler_irsa_and_tags_prod.sh
 #
 # Argo CD reconciles Kubernetes objects against git and nothing else. It cannot
 # create an IAM role, read AWS Secrets Manager, or tag an Auto Scaling group.
@@ -35,7 +35,7 @@ spec:
   source:
     repoURL: https://github.com/nopega/ice-berg-platform.git
     targetRevision: main
-    path: script/set_up_cluster/10_cluster_autoscaler_prod/chart/cluster-autoscaler
+    path: script/set_up_cluster/09_cluster_autoscaler_prod/chart/cluster-autoscaler
     helm:
       # The vendored values.yaml, unchanged. Every deviation from upstream is
       # commented in place there and greppable with "data-platform)" -- there is

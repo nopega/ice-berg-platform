@@ -1,0 +1,139 @@
+# Spark History Server.
+#
+# WHY THIS EXISTS AT ALL
+# ------------------------
+# A Spark driver serves its own UI on port 4040, and that UI dies with the
+# driver. It cannot be given a hostname for two independent reasons: the pod
+# only exists while a job runs -- this DAG runs once a day for a few minutes,
+# so the `spark` namespace is empty the rest of the time -- and its name
+# carries a random suffix that changes every run
+# (`taxi-bronze-20240115-mtb9nwth`, then `-ua6l2sko`, then `-3cl22jz7`), so
+# there is nothing stable for a Service selector to match.
+#
+# `delete_on_termination: false` in the DAG keeps the pod OBJECT afterwards so
+# its logs can be read, but the pod is Completed, not running. Nothing answers
+# on 4040.
+#
+# The History Server solves it from the other end: every driver writes an event
+# log to S3 before it exits, and this reads those logs and renders the same UI.
+# One permanent Deployment, one stable name, and history that outlives the pod
+# that produced it.
+#
+# WHY IT NEEDS NO NEW IAM
+# -------------------------
+# It runs as the `spark` ServiceAccount, whose IRSA role already carries
+# GetObject and ListBucket on s3://data-store-prod-logs/spark-events -- the
+# same grants the drivers use to WRITE there. Reading back what you wrote needs
+# nothing extra.
+#
+# NO AUTHENTICATION, AND THAT IS A REAL TRADE
+# ---------------------------------------------
+# Spark's History Server has no login. What protects it is the ALB's
+# inbound-cidrs allowlist, which is a network control rather than an identity
+# one. It exposes job names, timings, SQL plans and row counts -- operational
+# detail, not data. Anything longer-lived than this should sit behind
+# Cloudflare Access, as Grafana and Argo CD arguably should too.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-history-server
+  namespace: spark
+  labels:
+    app.kubernetes.io/name: spark-history-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spark-history-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spark-history-server
+    spec:
+      # The same ServiceAccount the drivers use. Its IRSA role reads the event
+      # log prefix already.
+      serviceAccountName: spark
+      imagePullSecrets:
+        - name: harbor-pull
+      nodeSelector:
+        workload: critical
+      containers:
+        - name: history-server
+          # The platform's own Spark image, not an upstream one: it already
+          # carries the matching Spark version and the hadoop-aws / AWS SDK
+          # jars that reading s3a:// requires. A stock image would start and
+          # then fail to list the log directory.
+          image: harbor.nopega.net/ice-berg-platform/datapipeline:v1.0.2
+          imagePullPolicy: IfNotPresent
+          # spark-class rather than start-history-server.sh: the shell wrapper
+          # daemonises and returns, so the container would exit immediately
+          # with status 0 and Kubernetes would restart it forever.
+          command: ["/opt/spark/bin/spark-class"]
+          args: ["org.apache.spark.deploy.history.HistoryServer"]
+          env:
+            - name: SPARK_NO_DAEMONIZE
+              value: "true"
+            # Configuration goes in as JVM properties because the History
+            # Server does not read a SparkConf from anywhere else.
+            #
+            # The trailing slash on logDirectory matters: without it S3A treats
+            # the value as an object key rather than a prefix and the server
+            # starts with an empty application list and no error.
+            #
+            # WebIdentityTokenFileCredentialsProvider is what makes IRSA work.
+            # The default chain would try instance metadata, which pods on this
+            # cluster cannot reach, and the failure surfaces as a timeout
+            # rather than as a credentials problem.
+            - name: SPARK_HISTORY_OPTS
+              value: >-
+                -Dspark.history.fs.logDirectory=s3a://data-store-prod-logs/spark-events/
+                -Dspark.history.ui.port=18080
+                -Dspark.history.fs.update.interval=60s
+                -Dspark.history.retainedApplications=50
+                -Dspark.hadoop.fs.s3a.aws.credentials.provider=software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider
+          ports:
+            - name: http
+              containerPort: 18080
+          resources:
+            # It parses event logs on a timer, which is bursty but small at
+            # this scale -- three applications a day. The memory limit exists
+            # because a pathologically large event log would otherwise take the
+            # node down with it; there is no CPU limit because throttling a
+            # parse just makes the UI slow to catch up.
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          readinessProbe:
+            # /api/v1/applications answers 200 with a JSON array as soon as the
+            # server is up, empty or not. Probing / would follow a redirect and
+            # report unready whenever there is no history yet.
+            httpGet:
+              path: /api/v1/applications
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /api/v1/applications
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spark-history-server
+  namespace: spark
+  labels:
+    app.kubernetes.io/name: spark-history-server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: spark-history-server
+  ports:
+    - name: http
+      port: 80
+      targetPort: 18080

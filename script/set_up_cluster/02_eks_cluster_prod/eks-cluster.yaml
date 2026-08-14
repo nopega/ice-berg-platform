@@ -102,7 +102,7 @@ managedNodeGroups:
   # maxSize stays above desiredCapacity so a node failure or a rolling
   # AMI/version update has somewhere to place pods while it cycles.
   # minSize equals desiredCapacity on purpose. The Cluster Autoscaler
-  # (set_up_cluster/10_cluster_autoscaler_prod) manages both node groups,
+  # (set_up_cluster/09_cluster_autoscaler_prod) manages both node groups,
   # and any min below desired is permission to drain this one -- evicting
   # Harbor, Trino, Polaris and Airflow -- the first time it looks
   # underutilised. maxSize is still above desired so it can GROW when a Spark
@@ -216,7 +216,7 @@ addons:
   # addon that claim was never true.
   #
   # Adding it here changes nothing on a running cluster -- see
-  # ../11_metrics_server_prod/, which adds it to the live one.
+  # ../10_metrics_server_prod/, which adds it to the live one.
   - name: metrics-server
     version: latest
 

@@ -155,7 +155,7 @@ so the registry runs normally and only fails on the first push.
 ### 5. Expose the hostname
 
 Nothing to do here — `harbor.nopega.net` is served by the shared ALB that
-`set_up_cluster/09_public_alb_prod/` creates, alongside `trino` and
+`set_up_public_access/` creates, alongside `trino` and
 `airflow`. An earlier revision of this file routed it through a Cloudflare
 Tunnel; that was abandoned because Cloudflare's free plan caps request bodies
 at 100 MB, and a container layer is routinely larger than that. A `docker push`

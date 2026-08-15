@@ -3,14 +3,21 @@
 > *"System architecture diagram, including reasons for choosing this
 > architecture and cost awareness justification."* — Deliverable 1
 
-![System architecture](diagrams/system_architecture.svg)
+The architecture is drawn as **two views of the same system**, in
+[`diagrams/ice_breg_dataplatform.drawio`](diagrams/ice_breg_dataplatform.drawio)
+(open in [draw.io](https://app.diagrams.net) — the file has two pages):
 
-Two editable companion views live in
-[`diagrams/eks-infrastructure.drawio`](diagrams/eks-infrastructure.drawio)
-(open in draw.io): page 1 **EKS Infrastructure** — the AWS layer with VPC,
-subnets, node groups and managed services; page 2 **Data Platform** — the
-Kubernetes layer grouped by namespace, with the write and read paths meeting
-at Polaris.
+| Page | View | Answers |
+|---|---|---|
+| **1 — EKS Infrastructure** | the AWS layer: VPC, public/private subnets across 2 AZs, node groups, NAT, ALB, RDS, S3 gateway endpoint, IAM/OIDC | *where does everything physically sit, and what does each piece cost* |
+| **2 — Data Platform** | the Kubernetes layer, grouped by namespace: the write path (Airflow → Spark Operator → driver/executors) and the read path (ALB → Trino) meeting at Polaris | *who talks to whom, and why access control has one choke point* |
+
+![EKS Infrastructure](diagrams/eks_infrastructure.png)
+
+![Data Platform](diagrams/data_platform.png)
+
+*Both PNGs are exports of the .drawio file (File → Export As → PNG, one per
+page) — the .drawio is the source of truth; re-export after editing it.*
 
 ## The shape, in one paragraph
 

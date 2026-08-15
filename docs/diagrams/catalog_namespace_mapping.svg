@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 900" width="1180" height="900">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5f6368"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1180" height="900" fill="#ffffff"/>
+
+  <text x="30" y="42" font-family="Helvetica Neue, Arial, sans-serif" font-size="24" font-weight="bold" fill="#1a1a1a">ของสิ่งเดียวกัน แต่ถูกเรียกคนละชื่อใน 3 ที่</text>
+  <text x="30" y="70" font-family="Helvetica Neue, Arial, sans-serif" font-size="15" fill="#5f6368">แถวเดียวกันในแนวนอน = ของชิ้นเดียวกัน แค่มองจากคนละมุม</text>
+
+  <!-- Column headers -->
+  <rect x="30" y="92" width="310" height="44" rx="6" fill="#1a73e8"/>
+  <text x="185" y="120" font-family="Helvetica Neue, Arial, sans-serif" font-size="17" font-weight="bold" fill="#ffffff" text-anchor="middle">1. Trino  (สิ่งที่คุณพิมพ์)</text>
+
+  <rect x="400" y="92" width="310" height="44" rx="6" fill="#e37400"/>
+  <text x="555" y="120" font-family="Helvetica Neue, Arial, sans-serif" font-size="17" font-weight="bold" fill="#ffffff" text-anchor="middle">2. Polaris  (สมุดทะเบียน)</text>
+
+  <rect x="770" y="92" width="380" height="44" rx="6" fill="#137333"/>
+  <text x="960" y="120" font-family="Helvetica Neue, Arial, sans-serif" font-size="17" font-weight="bold" fill="#ffffff" text-anchor="middle">3. S3  (ที่ไฟล์อยู่จริง)</text>
+
+  <!-- ROW 1 : catalog -->
+  <rect x="30" y="156" width="310" height="112" rx="8" fill="#e8f0fe" stroke="#1a73e8" stroke-width="2"/>
+  <text x="48" y="182" font-family="Helvetica Neue, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a73e8">CATALOG</text>
+  <text x="48" y="212" font-family="SF Mono, Menlo, monospace" font-size="18" font-weight="bold" fill="#1a1a1a">data_platform</text>
+  <text x="48" y="238" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">ชื่อเล่นที่ Trino ตั้งเอง</text>
+  <text x="48" y="256" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">ตั้งให้ตรงกับ Polaris จะได้ไม่งง</text>
+
+  <rect x="400" y="156" width="310" height="112" rx="8" fill="#fef7e0" stroke="#e37400" stroke-width="2"/>
+  <text x="418" y="182" font-family="Helvetica Neue, Arial, sans-serif" font-size="12" font-weight="bold" fill="#e37400">CATALOG</text>
+  <text x="418" y="212" font-family="SF Mono, Menlo, monospace" font-size="19" font-weight="bold" fill="#1a1a1a">data_platform</text>
+  <text x="418" y="238" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">ชื่อจริง สร้างโดยสคริปต์ 05</text>
+  <text x="418" y="256" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">เก็บทะเบียนไว้ใน RDS</text>
+
+  <rect x="770" y="156" width="380" height="112" rx="8" fill="#e6f4ea" stroke="#137333" stroke-width="2"/>
+  <text x="788" y="182" font-family="Helvetica Neue, Arial, sans-serif" font-size="12" font-weight="bold" fill="#137333">BUCKET</text>
+  <text x="788" y="212" font-family="SF Mono, Menlo, monospace" font-size="17" font-weight="bold" fill="#1a1a1a">data-store-prod-warehouse</text>
+  <text x="788" y="238" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">ตู้เซฟใหญ่ ใบเดียว</text>
+  <text x="788" y="256" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">ข้างในแบ่งเป็นช่องตาม data tier</text>
+
+  <line x1="345" y1="212" x2="393" y2="212" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="715" y1="212" x2="763" y2="212" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ROW 2 : namespace -->
+  <rect x="30" y="296" width="310" height="112" rx="8" fill="#e8f0fe" stroke="#1a73e8" stroke-width="2"/>
+  <text x="48" y="322" font-family="Helvetica Neue, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a73e8">SCHEMA</text>
+  <text x="48" y="352" font-family="SF Mono, Menlo, monospace" font-size="19" font-weight="bold" fill="#1a1a1a">delivery</text>
+  <text x="48" y="378" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">Trino เรียกชั้นนี้ว่า schema</text>
+  <text x="48" y="396" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">(SHOW SCHEMAS FROM data_platform)</text>
+
+  <rect x="400" y="296" width="310" height="112" rx="8" fill="#fef7e0" stroke="#e37400" stroke-width="2"/>
+  <text x="418" y="322" font-family="Helvetica Neue, Arial, sans-serif" font-size="12" font-weight="bold" fill="#e37400">NAMESPACE</text>
+  <text x="418" y="352" font-family="SF Mono, Menlo, monospace" font-size="19" font-weight="bold" fill="#1a1a1a">delivery</text>
+  <text x="418" y="378" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">Iceberg เรียกชั้นนี้ว่า namespace</text>
+  <text x="418" y="396" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">คำต่างกัน แต่คือของชิ้นเดียวกัน</text>
+
+  <rect x="770" y="296" width="380" height="112" rx="8" fill="#e6f4ea" stroke="#137333" stroke-width="2"/>
+  <text x="788" y="322" font-family="Helvetica Neue, Arial, sans-serif" font-size="12" font-weight="bold" fill="#137333">PREFIX (โฟลเดอร์)</text>
+  <text x="788" y="352" font-family="SF Mono, Menlo, monospace" font-size="17" font-weight="bold" fill="#1a1a1a">transactional/delivery/</text>
+  <text x="788" y="378" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">transactional = ช่องตาม data tier</text>
+  <text x="788" y="396" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">มี lifecycle policy ของตัวเอง</text>
+
+  <line x1="345" y1="352" x2="393" y2="352" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="715" y1="352" x2="763" y2="352" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- ROW 3 : table -->
+  <rect x="30" y="436" width="310" height="132" rx="8" fill="#e8f0fe" stroke="#1a73e8" stroke-width="2"/>
+  <text x="48" y="462" font-family="Helvetica Neue, Arial, sans-serif" font-size="12" font-weight="bold" fill="#1a73e8">TABLE</text>
+  <text x="48" y="492" font-family="SF Mono, Menlo, monospace" font-size="19" font-weight="bold" fill="#1a1a1a">orders</text>
+  <text x="48" y="518" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">คุณเห็นเป็นตารางปกติ</text>
+  <text x="48" y="536" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">SELECT / INSERT ได้เหมือน SQL</text>
+  <text x="48" y="554" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">ทั่วไป</text>
+
+  <rect x="400" y="436" width="310" height="132" rx="8" fill="#fef7e0" stroke="#e37400" stroke-width="2"/>
+  <text x="418" y="462" font-family="Helvetica Neue, Arial, sans-serif" font-size="12" font-weight="bold" fill="#e37400">TABLE (ทะเบียน)</text>
+  <text x="418" y="492" font-family="SF Mono, Menlo, monospace" font-size="19" font-weight="bold" fill="#1a1a1a">orders</text>
+  <text x="418" y="518" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">Polaris ไม่เก็บข้อมูลเอง</text>
+  <text x="418" y="536" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">เก็บแค่ที่อยู่ของ metadata.json</text>
+  <text x="418" y="554" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">ล่าสุด + สิทธิ์ว่าใครแตะได้</text>
+
+  <rect x="770" y="436" width="380" height="132" rx="8" fill="#e6f4ea" stroke="#137333" stroke-width="2"/>
+  <text x="788" y="462" font-family="Helvetica Neue, Arial, sans-serif" font-size="12" font-weight="bold" fill="#137333">โฟลเดอร์ของ table</text>
+  <text x="788" y="490" font-family="SF Mono, Menlo, monospace" font-size="16" font-weight="bold" fill="#1a1a1a">transactional/delivery/orders/</text>
+  <text x="806" y="516" font-family="SF Mono, Menlo, monospace" font-size="14" fill="#1a1a1a">metadata/</text>
+  <text x="906" y="516" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">metadata.json, manifest</text>
+  <text x="806" y="540" font-family="SF Mono, Menlo, monospace" font-size="14" fill="#1a1a1a">data/</text>
+  <text x="906" y="540" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#3c4043">ไฟล์ Parquet ของจริง</text>
+  <text x="788" y="560" font-family="Helvetica Neue, Arial, sans-serif" font-size="12" fill="#5f6368">ข้อมูลทั้งหมดหนักอยู่ตรงนี้ที่เดียว</text>
+
+  <line x1="345" y1="492" x2="393" y2="492" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="715" y1="492" x2="763" y2="492" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Bottom panel -->
+  <rect x="30" y="608" width="1120" height="262" rx="8" fill="#f8f9fa" stroke="#dadce0" stroke-width="2"/>
+  <text x="52" y="642" font-family="Helvetica Neue, Arial, sans-serif" font-size="17" font-weight="bold" fill="#1a1a1a">เวลาคุณสั่ง query จริง เกิดอะไรขึ้น</text>
+
+  <text x="52" y="678" font-family="SF Mono, Menlo, monospace" font-size="17" fill="#1a1a1a">SELECT * FROM </text>
+  <text x="216" y="678" font-family="SF Mono, Menlo, monospace" font-size="17" font-weight="bold" fill="#1a73e8">data_platform</text>
+  <text x="353" y="678" font-family="SF Mono, Menlo, monospace" font-size="17" fill="#1a1a1a">.</text>
+  <text x="364" y="678" font-family="SF Mono, Menlo, monospace" font-size="17" font-weight="bold" fill="#e37400">delivery</text>
+  <text x="448" y="678" font-family="SF Mono, Menlo, monospace" font-size="17" fill="#1a1a1a">.</text>
+  <text x="459" y="678" font-family="SF Mono, Menlo, monospace" font-size="17" font-weight="bold" fill="#137333">orders</text>
+
+  <circle cx="64" cy="712" r="11" fill="#1a73e8"/>
+  <text x="64" y="717" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" font-weight="bold" fill="#ffffff" text-anchor="middle">1</text>
+  <text x="86" y="717" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#1a1a1a">Trino เห็นชื่อ catalog แล้วรู้ว่าต้องไปถาม Polaris (ชื่อสองฝั่งตรงกัน แต่คนละระบบกัน)</text>
+
+  <circle cx="64" cy="750" r="11" fill="#e37400"/>
+  <text x="64" y="755" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" font-weight="bold" fill="#ffffff" text-anchor="middle">2</text>
+  <text x="86" y="755" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#1a1a1a">Polaris ตรวจสิทธิ์ก่อน ถ้าผ่าน จึงตอบกลับมา 2 อย่าง: ที่อยู่ของ metadata.json ล่าสุด</text>
+  <text x="86" y="774" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#1a1a1a">และ กุญแจ S3 ชั่วคราว ที่เปิดได้เฉพาะโฟลเดอร์นี้เท่านั้น (credential vending)</text>
+
+  <circle cx="64" cy="806" r="11" fill="#137333"/>
+  <text x="64" y="811" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" font-weight="bold" fill="#ffffff" text-anchor="middle">3</text>
+  <text x="86" y="811" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#1a1a1a">Trino ใช้กุญแจนั้นไปอ่านไฟล์ Parquet จาก S3 ตรงๆ ข้อมูลไม่วิ่งผ่าน Polaris เลย</text>
+  <text x="86" y="830" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#1a1a1a">Polaris จึงไม่เป็นคอขวด แม้ข้อมูลจะโตระดับ TB</text>
+
+  <text x="52" y="858" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#5f6368">ข้อ 2 คือจุดที่ไฟล์ 06 (team roles) ทำงาน — team_b ขอกุญแจ ก็ได้กุญแจที่เปิดได้แต่ไม่ให้เขียน</text>
+</svg>

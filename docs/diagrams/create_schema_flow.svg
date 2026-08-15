@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 980" width="1180" height="980">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5f6368"/>
+    </marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1a73e8"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1180" height="980" fill="#ffffff"/>
+
+  <text x="30" y="42" font-family="Helvetica Neue, Arial, sans-serif" font-size="24" font-weight="bold" fill="#1a1a1a">ตอนสั่ง CREATE SCHEMA เกิดอะไรขึ้นบ้าง</text>
+  <text x="30" y="70" font-family="Helvetica Neue, Arial, sans-serif" font-size="15" fill="#5f6368">คำสั่งเดียว แต่วิ่งผ่าน 3 ระบบ ก่อนจะกลายเป็นโฟลเดอร์ + ทะเบียนในฐานข้อมูล</text>
+
+  <!-- the command -->
+  <rect x="30" y="92" width="1120" height="56" rx="8" fill="#1a1a1a"/>
+  <text x="52" y="127" font-family="SF Mono, Menlo, monospace" font-size="16" fill="#ffffff">CREATE SCHEMA data_platform.delivery WITH (location = 's3://data-store-prod-warehouse/transactional/delivery')</text>
+
+  <!-- 3 lane headers -->
+  <rect x="30" y="176" width="330" height="40" rx="6" fill="#1a73e8"/>
+  <text x="195" y="202" font-family="Helvetica Neue, Arial, sans-serif" font-size="15" font-weight="bold" fill="#ffffff" text-anchor="middle">Trino</text>
+
+  <rect x="415" y="176" width="330" height="40" rx="6" fill="#e37400"/>
+  <text x="580" y="202" font-family="Helvetica Neue, Arial, sans-serif" font-size="15" font-weight="bold" fill="#ffffff" text-anchor="middle">Polaris</text>
+
+  <rect x="800" y="176" width="350" height="40" rx="6" fill="#137333"/>
+  <text x="975" y="202" font-family="Helvetica Neue, Arial, sans-serif" font-size="15" font-weight="bold" fill="#ffffff" text-anchor="middle">RDS (metadata) / S3 (ไฟล์)</text>
+
+  <!-- lane vertical guides -->
+  <line x1="195" y1="216" x2="195" y2="900" stroke="#dadce0" stroke-width="1.5" stroke-dasharray="4 4"/>
+  <line x1="580" y1="216" x2="580" y2="900" stroke="#dadce0" stroke-width="1.5" stroke-dasharray="4 4"/>
+  <line x1="975" y1="216" x2="975" y2="900" stroke="#dadce0" stroke-width="1.5" stroke-dasharray="4 4"/>
+
+  <!-- STEP 1 -->
+  <circle cx="195" cy="260" r="16" fill="#1a73e8"/>
+  <text x="195" y="266" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">1</text>
+  <rect x="60" y="290" width="270" height="70" rx="8" fill="#e8f0fe" stroke="#1a73e8" stroke-width="2"/>
+  <text x="80" y="316" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#1a1a1a" font-weight="bold">รับคำสั่ง SQL</text>
+  <text x="80" y="336" font-family="Helvetica Neue, Arial, sans-serif" font-size="12.5" fill="#3c4043">แปลว่า catalog "data_platform"</text>
+  <text x="80" y="352" font-family="Helvetica Neue, Arial, sans-serif" font-size="12.5" fill="#3c4043">คือ Polaris ตัวไหน (จาก config)</text>
+
+  <line x1="330" y1="325" x2="405" y2="325" stroke="#1a73e8" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="335" y="315" font-family="Helvetica Neue, Arial, sans-serif" font-size="11" fill="#5f6368">POST /namespaces</text>
+  <text x="335" y="345" font-family="Helvetica Neue, Arial, sans-serif" font-size="11" fill="#5f6368">(REST API + OAuth2 token)</text>
+
+  <!-- STEP 2 -->
+  <circle cx="580" cy="260" r="16" fill="#e37400"/>
+  <text x="580" y="266" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">2</text>
+  <rect x="435" y="290" width="290" height="90" rx="8" fill="#fef7e0" stroke="#e37400" stroke-width="2"/>
+  <text x="455" y="316" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#1a1a1a" font-weight="bold">ตรวจสิทธิ์ + ตรวจ location</text>
+  <text x="455" y="336" font-family="Helvetica Neue, Arial, sans-serif" font-size="12.5" fill="#3c4043">principal นี้มีสิทธิ์สร้าง namespace</text>
+  <text x="455" y="352" font-family="Helvetica Neue, Arial, sans-serif" font-size="12.5" fill="#3c4043">ใน catalog นี้ไหม + path ที่ขอ อยู่ใน</text>
+  <text x="455" y="368" font-family="Helvetica Neue, Arial, sans-serif" font-size="12.5" fill="#3c4043">allowedLocations ที่ตั้งไว้หรือเปล่า</text>
+
+  <line x1="725" y1="335" x2="795" y2="335" stroke="#e37400" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="729" y="325" font-family="Helvetica Neue, Arial, sans-serif" font-size="11" fill="#5f6368">INSERT row</text>
+
+  <!-- STEP 3 -->
+  <circle cx="975" cy="260" r="16" fill="#137333"/>
+  <text x="975" y="266" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">3</text>
+  <rect x="820" y="290" width="310" height="90" rx="8" fill="#e6f4ea" stroke="#137333" stroke-width="2"/>
+  <text x="840" y="316" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#1a1a1a" font-weight="bold">บันทึกลง RDS (ยังไม่แตะ S3)</text>
+  <text x="840" y="336" font-family="Helvetica Neue, Arial, sans-serif" font-size="12.5" fill="#3c4043">เพิ่มแถวใหม่ในตาราง namespace:</text>
+  <text x="840" y="352" font-family="Helvetica Neue, Arial, sans-serif" font-size="12.5" fill="#3c4043">ชื่อ = delivery, location = s3://...</text>
+  <text x="840" y="368" font-family="Helvetica Neue, Arial, sans-serif" font-size="12.5" fill="#3c4043">S3 ยังไม่มีไฟล์ใดๆ ถูกสร้างตอนนี้</text>
+
+  <!-- STEP 4 (return path) -->
+  <line x1="975" y1="380" x2="975" y2="430" stroke="#5f6368" stroke-width="2"/>
+  <line x1="975" y1="430" x2="600" y2="430" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="700" y="422" font-family="Helvetica Neue, Arial, sans-serif" font-size="11" fill="#5f6368">HTTP 200 OK</text>
+
+  <circle cx="580" cy="460" r="16" fill="#e37400"/>
+  <text x="580" y="466" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">4</text>
+  <rect x="435" y="490" width="290" height="56" rx="8" fill="#fef7e0" stroke="#e37400" stroke-width="2"/>
+  <text x="455" y="514" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#1a1a1a" font-weight="bold">ตอบกลับว่าสร้างสำเร็จ</text>
+  <text x="455" y="532" font-family="Helvetica Neue, Arial, sans-serif" font-size="12.5" fill="#3c4043">ไม่ได้ไปสร้างอะไรใน S3 เลย</text>
+
+  <line x1="435" y1="518" x2="360" y2="518" stroke="#5f6368" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <circle cx="195" cy="460" r="16" fill="#1a73e8"/>
+  <text x="195" y="466" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">5</text>
+  <rect x="60" y="490" width="270" height="56" rx="8" fill="#e8f0fe" stroke="#1a73e8" stroke-width="2"/>
+  <text x="80" y="514" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" fill="#1a1a1a" font-weight="bold">แสดงผล "CREATE SCHEMA"</text>
+  <text x="80" y="532" font-family="Helvetica Neue, Arial, sans-serif" font-size="12.5" fill="#3c4043">ผู้ใช้เห็นว่าเสร็จแล้ว</text>
+
+  <!-- key insight box -->
+  <rect x="30" y="580" width="1120" height="150" rx="8" fill="#fce8e6" stroke="#c5221f" stroke-width="2"/>
+  <text x="52" y="612" font-family="Helvetica Neue, Arial, sans-serif" font-size="16" font-weight="bold" fill="#c5221f">จุดที่มักเข้าใจผิด: CREATE SCHEMA ไม่ได้สร้างโฟลเดอร์ใน S3</text>
+  <text x="52" y="640" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#3c4043">S3 ไม่มีแนวคิดเรื่อง "โฟลเดอร์" จริงๆ (มันคือ object storage แบน ๆ) การ CREATE SCHEMA แค่บันทึกไว้ใน</text>
+  <text x="52" y="662" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#3c4043">RDS ว่า "ถ้ามีใครสร้าง table ใน namespace นี้ ให้เอาไฟล์ไปวางที่ path นี้" — พูดง่ายๆ คือ "จองที่" ไว้ล่วงหน้า</text>
+  <text x="52" y="684" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#3c4043">เท่านั้น ไฟล์จริง (metadata.json, ไฟล์ Parquet) จะถูกเขียนลง S3 ก็ต่อเมื่อมีคน CREATE TABLE + INSERT ข้อมูล</text>
+  <text x="52" y="706" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#3c4043">เข้าไปจริงๆ (ตอนนั้นถึงจะเห็นขั้นตอน credential vending / sts:AssumeRole ที่คุยกันไปรอบก่อน)</text>
+
+  <!-- comparison table -->
+  <text x="30" y="762" font-family="Helvetica Neue, Arial, sans-serif" font-size="16" font-weight="bold" fill="#1a1a1a">เทียบให้ชัด: CREATE SCHEMA vs CREATE TABLE + INSERT</text>
+
+  <rect x="30" y="782" width="1120" height="42" fill="#f1f3f4"/>
+  <text x="52" y="808" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a1a1a">การกระทำ</text>
+  <text x="330" y="808" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a1a1a">แตะ RDS?</text>
+  <text x="540" y="808" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a1a1a">แตะ S3?</text>
+  <text x="750" y="808" font-family="Helvetica Neue, Arial, sans-serif" font-size="13" font-weight="bold" fill="#1a1a1a">ใช้ credential vending?</text>
+
+  <rect x="30" y="824" width="1120" height="66" fill="#ffffff" stroke="#dadce0" stroke-width="1"/>
+  <text x="52" y="850" font-family="SF Mono, Menlo, monospace" font-size="13" fill="#1a1a1a">CREATE SCHEMA</text>
+  <text x="52" y="870" font-family="Helvetica Neue, Arial, sans-serif" font-size="12" fill="#5f6368">(namespace)</text>
+  <text x="330" y="862" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#137333">✓ เขียน 1 แถว</text>
+  <text x="540" y="862" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#c5221f">✗ ไม่แตะ</text>
+  <text x="750" y="862" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#c5221f">✗ ไม่ต้องใช้</text>
+
+  <rect x="30" y="890" width="1120" height="66" fill="#f8f9fa" stroke="#dadce0" stroke-width="1"/>
+  <text x="52" y="916" font-family="SF Mono, Menlo, monospace" font-size="13" fill="#1a1a1a">CREATE TABLE + INSERT</text>
+  <text x="52" y="936" font-family="Helvetica Neue, Arial, sans-serif" font-size="12" fill="#5f6368">(table + ข้อมูลจริง)</text>
+  <text x="330" y="928" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#137333">✓ เขียนทะเบียน table</text>
+  <text x="540" y="928" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#137333">✓ เขียนไฟล์จริง</text>
+  <text x="750" y="928" font-family="Helvetica Neue, Arial, sans-serif" font-size="14" fill="#137333">✓ ต้องขอกุญแจชั่วคราว</text>
+</svg>
